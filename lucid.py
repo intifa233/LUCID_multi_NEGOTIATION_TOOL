@@ -19,6 +19,17 @@ app = Flask(__name__)
 
 # --- Offer Extraction Functions ---
 
+def _empty_offer_result(message, role='assistant'):
+    return {
+        'has_offer': False,
+        'role': role,
+        'raw_message': message,
+        'keywords': [],
+        'numeric_values': [],
+        'offer_phrases': [],
+        'extraction_method': 'ai_only'
+    }
+
 def _extract_offers_rule_based(message, role='user'):
     """
     Fallback rule-based offer extraction using keyword detection and regex.
@@ -52,7 +63,8 @@ def _extract_offers_rule_based(message, role='user'):
 def extract_offers_from_message(message, role='user'):
     """
     Extracts negotiation offers from a message using AI analysis.
-    Falls back to rule-based extraction if AI API fails.
+    Uses AI-only extraction. If the AI call fails or no API key is configured,
+    returns an empty result so only model-derived offers are surfaced.
     
     Returns a dictionary with extracted offer components:
     {
@@ -72,8 +84,8 @@ def extract_offers_from_message(message, role='user'):
         )
         
         if not openai_api_key:
-            print("[INFO] OpenAI API key not available, using rule-based extraction")
-            return _extract_offers_rule_based(message, role)
+            print("[INFO] OpenAI API key not available, skipping offer extraction")
+            return _empty_offer_result(message, role)
         
         # Call OpenAI to extract offers
         openai_url = 'https://api.openai.com/v1/chat/completions'
@@ -130,42 +142,147 @@ Focus on understanding the intent and meaning, not just keyword matching. Consid
             return result
         else:
             # If API call fails, fall back to rule-based
-            print(f"[INFO] OpenAI API error ({response_openai.status_code}), using rule-based extraction")
-            return _extract_offers_rule_based(message, role)
+            print(f"[INFO] OpenAI API error ({response_openai.status_code}), skipping offer extraction")
+            return _empty_offer_result(message, role)
             
     except (json.JSONDecodeError, KeyError, requests.exceptions.RequestException, Exception) as e:
-        # Any error → fall back to rule-based
-        print(f"[INFO] Error in AI extraction ({type(e).__name__}), falling back to rule-based: {e}")
-        return _extract_offers_rule_based(message, role)
+        # Any error → return an empty result so only AI-derived offers are shown
+        print(f"[INFO] Error in AI extraction ({type(e).__name__}), skipping offer extraction: {e}")
+        return _empty_offer_result(message, role)
 
 def get_latest_offers(conversation_history):
     """
     Analyzes conversation history to extract the latest offers from both user and assistant.
     Returns a structured summary of the most recent offers from each side.
     """
-    user_offers = []
     assistant_offers = []
     
     for msg in conversation_history:
-        if msg.get('role') == 'user':
-            offer_data = extract_offers_from_message(msg.get('content', ''), 'user')
-            if offer_data['has_offer']:
-                user_offers.append(offer_data)
-        elif msg.get('role') == 'assistant':
+        if msg.get('role') == 'assistant':
             offer_data = extract_offers_from_message(msg.get('content', ''), 'assistant')
             if offer_data['has_offer']:
                 assistant_offers.append(offer_data)
     
     # Get the latest offer from each side
-    latest_user_offer = user_offers[-1] if user_offers else None
     latest_assistant_offer = assistant_offers[-1] if assistant_offers else None
     
     return {
-        'user_latest_offer': latest_user_offer,
+        'user_latest_offer': None,
         'assistant_latest_offer': latest_assistant_offer,
-        'user_offer_count': len(user_offers),
+        'user_offer_count': 0,
         'assistant_offer_count': len(assistant_offers),
     }
+
+
+def extract_issue_statuses_from_history(conversation_history, openai_api_key=None):
+    """
+    Analyze the conversation history and return a list of issue status objects for the
+    negotiation issues. Attempts to use the OpenAI API when an API key is available,
+    otherwise returns a sensible default list of issues with status 'Open'.
+
+    Returned format:
+    [
+      {"id": "issue-1", "label": "Bonus", "status": "Open"},
+      ... (8 items)
+    ]
+    """
+    # Default issue set (matches Qualtrics template defaults)
+    defaults = [
+        { 'id': 'issue-1', 'label': 'Bonus', 'status': '' },
+        { 'id': 'issue-2', 'label': 'Job Assignment', 'status': '' },
+        { 'id': 'issue-3', 'label': 'Vacation Time', 'status': '' },
+        { 'id': 'issue-4', 'label': 'Starting Date', 'status': '' },
+        { 'id': 'issue-5', 'label': 'Moving Expense Coverage', 'status': '' },
+        { 'id': 'issue-6', 'label': 'Insurance Coverage', 'status': '' },
+        { 'id': 'issue-7', 'label': 'Salary', 'status': '' },
+        { 'id': 'issue-8', 'label': 'Location', 'status': '' }
+    ]
+
+    # Allow passing the API key directly for testability; otherwise read env var
+    if not openai_api_key:
+        openai_api_key = os.getenv('OPENAI_API_KEY') or os.getenv('openai_api_key')
+
+    if not openai_api_key:
+        # No API key — return defaults
+        return defaults
+
+    # Build a concise conversation string for the model to analyze
+    try:
+        convo_text = ''
+        for msg in conversation_history[-40:]:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            convo_text += f"[{role.upper()}] {content}\n"
+
+        system_prompt = (
+            "You are a negotiation analyst. Given the conversation below, extract the assistant's latest offered "
+            "term/value for each issue: Bonus, Job Assignment, Vacation Time, Starting Date, "
+            "Moving Expense Coverage, Insurance Coverage, Salary, and Location. "
+            "For each issue, status must be the concrete offered value if present (examples: '8%', 'Division B', "
+            "'20 days', 'June 15', '90%', 'Plan C', '$88,000', 'Chicago'). "
+            "If the assistant has not offered a value for that issue yet, use an empty string. "
+            "Return ONLY valid JSON with top-level key 'issue_statuses' whose value is an array of objects in any order: "
+            "[{\"id\":\"issue-1\",\"label\":\"Bonus\",\"status\":\"...\"}, ...]."
+        )
+
+        payload = {
+            'model': 'gpt-4o-mini',
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': convo_text}
+            ],
+            'temperature': 0.0,
+            'max_tokens': 400
+        }
+
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {openai_api_key}'
+        }
+
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"[INFO] Issue-status extraction API returned {resp.status_code}, using defaults")
+            return defaults
+
+        resp_json = resp.json()
+        content = resp_json['choices'][0]['message']['content']
+        parsed = json.loads(content)
+        issue_statuses = parsed.get('issue_statuses') if isinstance(parsed, dict) else None
+        if not issue_statuses or not isinstance(issue_statuses, list):
+            return defaults
+
+        # Normalize model output to fixed issue slots by id/label (not model-provided array order)
+        def _norm_key(text):
+            return ''.join(ch for ch in str(text).lower() if ch.isalnum())
+
+        id_to_index = {f'issue-{i+1}': i for i in range(8)}
+        label_to_index = {_norm_key(item['label']): i for i, item in enumerate(defaults)}
+        merged = [dict(item) for item in defaults]
+
+        for item in issue_statuses:
+            if not isinstance(item, dict):
+                continue
+
+            idx = None
+            item_id = str(item.get('id', '')).strip().lower()
+            if item_id in id_to_index:
+                idx = id_to_index[item_id]
+            else:
+                item_label = _norm_key(item.get('label', ''))
+                idx = label_to_index.get(item_label)
+
+            if idx is None:
+                continue
+
+            status = item.get('status', '')
+            merged[idx]['status'] = str(status).strip() if status is not None else ''
+
+        return merged
+
+    except Exception as e:
+        print(f"[INFO] Exception during issue-status extraction: {e}")
+        return defaults
 
 # --- Configuration & CORS ---
 
@@ -516,6 +633,13 @@ def lucid():
                             'used_temperature': used_temperature, # Echo back parameters used
                             'offers': offers_data  # Include extracted offer data
                         }
+                        # Also extract issue statuses (AI-driven when API key present; otherwise defaults)
+                        try:
+                            issue_statuses = extract_issue_statuses_from_history(messages_with_ai_response, openai_api_key)
+                            response_data['issue_statuses'] = issue_statuses
+                        except Exception as e:
+                            print(f"[WARN /lucid] Failed to extract issue_statuses: {e}")
+                            response_data['issue_statuses'] = []
                         if used_seed is not None:
                             response_data['used_seed'] = used_seed # Echo back seed if used
 
