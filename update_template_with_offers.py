@@ -5,9 +5,10 @@ Properly handles JSON escaping when modifying the .qsf file.
 """
 import json
 import sys
+import os
 
-# Path to the template file
-TEMPLATE_PATH = "/Users/bxhan/Documents/GitHub/LUCID_NEGOTIATION_TOOL/LUCID_Negotiation_Template.qsf"
+# Path to the template file — defaults to the local directory; override via command-line argument
+TEMPLATE_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "LUCID_Negotiation_Template.qsf")
 
 # Load the template
 with open(TEMPLATE_PATH, 'r', encoding='utf-8') as f:

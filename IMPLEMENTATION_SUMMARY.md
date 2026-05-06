@@ -6,7 +6,7 @@ You now have a **LUCID_NEGOTIATION_TOOL** repository with negotiation offer extr
 
 ### ✅ 1. Cloned Repository
 - Cloned LUCID_TOOL_BACKEND → LUCID_NEGOTIATION_TOOL
-- Located at: `/Users/bxhan/Documents/GitHub/LUCID_NEGOTIATION_TOOL`
+- Located at: `/path/to/your/LUCID_NEGOTIATION_TOOL`
 
 ### ✅ 2. Backend Modifications (lucid.py)
 Added negotiation offer extraction with:
@@ -59,11 +59,11 @@ git push origin main
 ```
 
 ### Step 2: Set Environment Variables on Vercel
-1. Go to Vercel Dashboard → lucid-tool-backend-gtg3 project
+1. Go to Vercel Dashboard → your project
 2. Settings → Environment Variables
 3. Verify these are set:
    - `OPENAI_API_KEY` = your OpenAI key
-   - `ALLOWED_ORIGINS` = https://stevenshowe.co1.qualtrics.com
+   - `ALLOWED_ORIGINS` = https://yourdomain.qualtrics.com
 
 ### Step 3: Redeploy on Vercel
 - Deployments → Latest → Redeploy

@@ -34,7 +34,7 @@ def _extract_offers_rule_based(message, role='user'):
     numeric_pattern = r'\$?\d+(?:,\d{3})*(?:\.\d{2})?%?'
     numbers = re.findall(numeric_pattern, message)
     
-    # Extract common offer phrases (limit match length to prevent ReDoS)
+    # Extract common offer phrases (limit to 200 chars per match to prevent ReDoS vulnerability)
     offer_phrases = re.findall(r'(?:offer|propose|suggest|bid|counter)[^.!?]{0,200}[.!?]', message, re.IGNORECASE)
     
     has_offer = len(found_keywords) > 0 or len(numbers) > 0
