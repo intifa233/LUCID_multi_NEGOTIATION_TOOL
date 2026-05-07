@@ -174,11 +174,106 @@ def get_latest_offers(conversation_history):
     }
 
 
+def _default_issue_statuses():
+    return [
+        {'id': 'issue-1', 'label': 'Bonus', 'status': ''},
+        {'id': 'issue-2', 'label': 'Job Assignment', 'status': ''},
+        {'id': 'issue-3', 'label': 'Vacation Time', 'status': ''},
+        {'id': 'issue-4', 'label': 'Starting Date', 'status': ''},
+        {'id': 'issue-5', 'label': 'Moving Expense Coverage', 'status': ''},
+        {'id': 'issue-6', 'label': 'Insurance Coverage', 'status': ''},
+        {'id': 'issue-7', 'label': 'Salary', 'status': ''},
+        {'id': 'issue-8', 'label': 'Location', 'status': ''},
+    ]
+
+
+def _extract_issue_updates_from_message(message):
+    """
+    Extract only the issue values explicitly updated in this single message.
+    If an issue is not clearly updated in this message, it is omitted.
+    """
+    if not message:
+        return {}
+
+    text = str(message)
+    lower = text.lower()
+    updates = {}
+
+    month_day = re.search(
+        r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b',
+        text,
+        re.IGNORECASE,
+    )
+    percent = re.search(r'\b\d{1,3}(?:\.\d+)?\s*%', text)
+    money = re.search(r'\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?', text)
+
+    # Issue 1: Bonus
+    if 'bonus' in lower:
+        if percent:
+            updates['issue-1'] = re.sub(r'\s+', '', percent.group(0))
+        elif money:
+            updates['issue-1'] = re.sub(r'\s+', '', money.group(0))
+
+    # Issue 2: Job Assignment
+    division = re.search(r'\bdivision\s*([a-e])\b', lower)
+    if division and ('division' in lower or 'job assignment' in lower):
+        updates['issue-2'] = f"Division {division.group(1).upper()}"
+
+    # Issue 3: Vacation Time
+    vac_days = re.search(r'\b(\d{1,2})\s*(day|days|week|weeks)\b', lower)
+    if ('vacation' in lower or 'pto' in lower or 'time off' in lower) and vac_days:
+        qty = vac_days.group(1)
+        unit = vac_days.group(2)
+        updates['issue-3'] = f"{qty} {unit}"
+
+    # Issue 4: Starting Date
+    if month_day and ('start' in lower or 'starting date' in lower or 'date' in lower):
+        updates['issue-4'] = month_day.group(0)
+
+    # Issue 5: Moving Expense Coverage
+    if 'moving' in lower or 'relocation' in lower:
+        if percent:
+            updates['issue-5'] = re.sub(r'\s+', '', percent.group(0))
+        elif 'full' in lower and 'cover' in lower:
+            updates['issue-5'] = 'Full coverage'
+        elif 'no' in lower and 'cover' in lower:
+            updates['issue-5'] = 'No coverage'
+
+    # Issue 6: Insurance Coverage
+    if 'insurance' in lower:
+        if percent:
+            updates['issue-6'] = re.sub(r'\s+', '', percent.group(0))
+        else:
+            plan = re.search(r'\bplan\s*([a-e])\b', lower)
+            if plan:
+                updates['issue-6'] = f"Plan {plan.group(1).upper()}"
+
+    # Issue 7: Salary
+    if ('salary' in lower or 'pay' in lower or 'compensation' in lower) and money:
+        updates['issue-7'] = re.sub(r'\s+', '', money.group(0))
+
+    # Issue 8: Location
+    city_map = {
+        'san francisco': 'San Francisco',
+        'atlanta': 'Atlanta',
+        'chicago': 'Chicago',
+        'boston': 'Boston',
+        'new york': 'New York',
+    }
+    for city_key, city_label in city_map.items():
+        if city_key in lower and ('location' in lower or 'based in' in lower or 'in ' + city_key in lower):
+            updates['issue-8'] = city_label
+            break
+
+    return updates
+
+
 def extract_issue_statuses_from_history(conversation_history, openai_api_key=None):
     """
-    Analyze the conversation history and return a list of issue status objects for the
-    negotiation issues. Attempts to use the OpenAI API when an API key is available,
-    otherwise returns a sensible default list of issues with status 'Open'.
+    Analyze assistant messages in order and incrementally update issue slots.
+    Only issues explicitly updated in a message are changed; all other slots are kept
+    as-is. This prevents unrelated slots from being wiped when a new message only
+    discusses one or two issues.
 
     Returned format:
     [
@@ -186,97 +281,22 @@ def extract_issue_statuses_from_history(conversation_history, openai_api_key=Non
       ... (8 items)
     ]
     """
-    # Default issue set (matches Qualtrics template defaults)
-    defaults = [
-        { 'id': 'issue-1', 'label': 'Bonus', 'status': '' },
-        { 'id': 'issue-2', 'label': 'Job Assignment', 'status': '' },
-        { 'id': 'issue-3', 'label': 'Vacation Time', 'status': '' },
-        { 'id': 'issue-4', 'label': 'Starting Date', 'status': '' },
-        { 'id': 'issue-5', 'label': 'Moving Expense Coverage', 'status': '' },
-        { 'id': 'issue-6', 'label': 'Insurance Coverage', 'status': '' },
-        { 'id': 'issue-7', 'label': 'Salary', 'status': '' },
-        { 'id': 'issue-8', 'label': 'Location', 'status': '' }
-    ]
+    defaults = _default_issue_statuses()
+    merged = [dict(item) for item in defaults]
+    id_to_index = {item['id']: idx for idx, item in enumerate(merged)}
 
-    # Allow passing the API key directly for testability; otherwise read env var
-    if not openai_api_key:
-        openai_api_key = os.getenv('OPENAI_API_KEY') or os.getenv('openai_api_key')
-
-    if not openai_api_key:
-        # No API key — return defaults
-        return defaults
-
-    # Build a concise conversation string for the model to analyze
     try:
-        convo_text = ''
-        for msg in conversation_history[-40:]:
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '')
-            convo_text += f"[{role.upper()}] {content}\n"
-
-        system_prompt = (
-            "You are a negotiation analyst. Given the conversation below, extract the assistant's latest offered "
-            "term/value for each issue: Bonus, Job Assignment, Vacation Time, Starting Date, "
-            "Moving Expense Coverage, Insurance Coverage, Salary, and Location. "
-            "For each issue, status must be the concrete offered value if present (examples: '8%', 'Division B', "
-            "'20 days', 'June 15', '90%', 'Plan C', '$88,000', 'Chicago'). "
-            "If the assistant has not offered a value for that issue yet, use an empty string. "
-            "Return ONLY valid JSON with top-level key 'issue_statuses' whose value is an array of objects in any order: "
-            "[{\"id\":\"issue-1\",\"label\":\"Bonus\",\"status\":\"...\"}, ...]."
-        )
-
-        payload = {
-            'model': 'gpt-4o-mini',
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': convo_text}
-            ],
-            'temperature': 0.0,
-            'max_tokens': 400
-        }
-
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {openai_api_key}'
-        }
-
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
-        if resp.status_code != 200:
-            print(f"[INFO] Issue-status extraction API returned {resp.status_code}, using defaults")
-            return defaults
-
-        resp_json = resp.json()
-        content = resp_json['choices'][0]['message']['content']
-        parsed = json.loads(content)
-        issue_statuses = parsed.get('issue_statuses') if isinstance(parsed, dict) else None
-        if not issue_statuses or not isinstance(issue_statuses, list):
-            return defaults
-
-        # Normalize model output to fixed issue slots by id/label (not model-provided array order)
-        def _norm_key(text):
-            return ''.join(ch for ch in str(text).lower() if ch.isalnum())
-
-        id_to_index = {f'issue-{i+1}': i for i in range(8)}
-        label_to_index = {_norm_key(item['label']): i for i, item in enumerate(defaults)}
-        merged = [dict(item) for item in defaults]
-
-        for item in issue_statuses:
-            if not isinstance(item, dict):
+        for msg in conversation_history:
+            if msg.get('role') != 'assistant':
                 continue
 
-            idx = None
-            item_id = str(item.get('id', '')).strip().lower()
-            if item_id in id_to_index:
-                idx = id_to_index[item_id]
-            else:
-                item_label = _norm_key(item.get('label', ''))
-                idx = label_to_index.get(item_label)
-
-            if idx is None:
-                continue
-
-            status = item.get('status', '')
-            merged[idx]['status'] = str(status).strip() if status is not None else ''
+            updates = _extract_issue_updates_from_message(msg.get('content', ''))
+            for issue_id, status in updates.items():
+                idx = id_to_index.get(issue_id)
+                if idx is None:
+                    continue
+                if status:
+                    merged[idx]['status'] = status
 
         return merged
 
