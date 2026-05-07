@@ -172,26 +172,45 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
     defaults = _default_issue_statuses()
     id_to_label = {item['id']: item['label'] for item in defaults}
     label_to_id = {_norm_key(item['label']): item['id'] for item in defaults}
+    # Common label variants that appear in assistant messages
+    label_aliases = {
+        'movingexpense': 'issue-5',
+        'movingexpensecovered': 'issue-5',
+        'movingexpensecoverage': 'issue-5',
+        'insurance': 'issue-6',
+        'insurancecovered': 'issue-6',
+        'insurancecoverage': 'issue-6',
+        'startdate': 'issue-4',
+        'jobassignmentdivision': 'issue-2',
+    }
+    label_to_id.update(label_aliases)
 
     prompt = (
         "You extract structured negotiation issue updates from ONE assistant message. "
+        "The message may contain markdown (**bold**), numbering, bullet points, or compact formatting. "
         "Identify ONLY issues explicitly updated in this message, and ignore issues not updated here. "
         "Issue IDs and labels are: "
         "issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation Time, issue-4 Starting Date, "
         "issue-5 Moving Expense Coverage, issue-6 Insurance Coverage, issue-7 Salary, issue-8 Location. "
-        "Return ONLY valid JSON in this shape: "
-        "{\"updates\":[{\"id\":\"issue-1\",\"status\":\"4%\"}]}. "
+        "Return ONLY valid JSON in this exact shape: "
+        "{\"updates\":[{\"id\":\"issue-1\",\"label\":\"Bonus\",\"status\":\"4%\"}]}. "
+        "Use ids whenever possible. Preserve exact values from the message (e.g., Division A, Plan E, August 1, $82,000, 60%). "
         "Do not include entries with empty status."
     )
+
+    cleaned_message = str(message)
+    cleaned_message = cleaned_message.replace('**', '')
+    cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
 
     payload = {
         'model': 'gpt-4o-mini',
         'messages': [
             {'role': 'system', 'content': prompt},
-            {'role': 'user', 'content': str(message)}
+            {'role': 'user', 'content': cleaned_message}
         ],
         'temperature': 0.0,
-        'max_tokens': 250
+        'max_tokens': 400,
+        'response_format': {'type': 'json_object'}
     }
 
     headers = {
@@ -200,7 +219,7 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
     }
 
     try:
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=8)
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=12)
         if resp.status_code != 200:
             print(f"[INFO] LLM issue-update extraction returned {resp.status_code}, skipping updates")
             return {}
@@ -224,6 +243,12 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
             return {}
 
         updates_list = parsed.get('updates')
+        if isinstance(updates_list, dict):
+            # Also accept shape: {"updates": {"issue-1": "4%", ...}}
+            updates_list = [
+                {'id': issue_id, 'status': status}
+                for issue_id, status in updates_list.items()
+            ]
         if not isinstance(updates_list, list):
             return {}
 
