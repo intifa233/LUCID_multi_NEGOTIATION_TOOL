@@ -30,36 +30,6 @@ def _empty_offer_result(message, role='assistant'):
         'extraction_method': 'ai_only'
     }
 
-def _extract_offers_rule_based(message, role='user'):
-    """
-    Fallback rule-based offer extraction using keyword detection and regex.
-    Used when AI-based extraction fails or is unavailable.
-    """
-    offer_keywords = ['offer', 'propose', 'proposal', 'suggest', 'counter', 'bid', 'price', 'cost', 
-                      'terms', 'deal', 'rate', 'amount', 'payment', 'discount', 'willing']
-    
-    message_lower = message.lower()
-    found_keywords = [kw for kw in offer_keywords if kw in message_lower]
-    
-    # Extract numbers (prices, quantities, percentages)
-    numeric_pattern = r'\$?\d+(?:,\d{3})*(?:\.\d{2})?%?'
-    numbers = re.findall(numeric_pattern, message)
-    
-    # Extract common offer phrases (limit to 200 chars per match to prevent ReDoS vulnerability)
-    offer_phrases = re.findall(r'(?:offer|propose|suggest|bid|counter)[^.!?]{0,200}[.!?]', message, re.IGNORECASE)
-    
-    has_offer = len(found_keywords) > 0 or len(numbers) > 0
-    
-    return {
-        'has_offer': has_offer,
-        'role': role,
-        'raw_message': message,
-        'keywords': found_keywords,
-        'numeric_values': numbers,
-        'offer_phrases': offer_phrases[:1] if offer_phrases else [],
-        'extraction_method': 'rule_based'
-    }
-
 def extract_offers_from_message(message, role='user'):
     """
     Extracts negotiation offers from a message using AI analysis.
@@ -73,7 +43,7 @@ def extract_offers_from_message(message, role='user'):
         'offer_summary': str,
         'numeric_values': list,
         'keywords': list,
-        'extraction_method': 'ai' or 'rule_based'
+        'extraction_method': 'ai'
     }
     """
     try:
@@ -187,85 +157,100 @@ def _default_issue_statuses():
     ]
 
 
-def _extract_issue_updates_from_message(message):
+def _extract_issue_updates_from_message_llm(message, openai_api_key):
     """
-    Extract only the issue values explicitly updated in this single message.
-    If an issue is not clearly updated in this message, it is omitted.
+    Use an LLM to extract issue updates from a single assistant message.
+    Returns a dict like {'issue-1': '4%', 'issue-7': '$84,000'}.
+    Returns {} on any failure.
     """
-    if not message:
+    if not message or not openai_api_key:
         return {}
 
-    text = str(message)
-    lower = text.lower()
-    updates = {}
+    def _norm_key(text):
+        return ''.join(ch for ch in str(text).lower() if ch.isalnum())
 
-    month_day = re.search(
-        r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b',
-        text,
-        re.IGNORECASE,
+    defaults = _default_issue_statuses()
+    id_to_label = {item['id']: item['label'] for item in defaults}
+    label_to_id = {_norm_key(item['label']): item['id'] for item in defaults}
+
+    prompt = (
+        "You extract structured negotiation issue updates from ONE assistant message. "
+        "Identify ONLY issues explicitly updated in this message, and ignore issues not updated here. "
+        "Issue IDs and labels are: "
+        "issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation Time, issue-4 Starting Date, "
+        "issue-5 Moving Expense Coverage, issue-6 Insurance Coverage, issue-7 Salary, issue-8 Location. "
+        "Return ONLY valid JSON in this shape: "
+        "{\"updates\":[{\"id\":\"issue-1\",\"status\":\"4%\"}]}. "
+        "Do not include entries with empty status."
     )
-    percent = re.search(r'\b\d{1,3}(?:\.\d+)?\s*%', text)
-    money = re.search(r'\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?', text)
 
-    # Issue 1: Bonus
-    if 'bonus' in lower:
-        if percent:
-            updates['issue-1'] = re.sub(r'\s+', '', percent.group(0))
-        elif money:
-            updates['issue-1'] = re.sub(r'\s+', '', money.group(0))
-
-    # Issue 2: Job Assignment
-    division = re.search(r'\bdivision\s*([a-e])\b', lower)
-    if division and ('division' in lower or 'job assignment' in lower):
-        updates['issue-2'] = f"Division {division.group(1).upper()}"
-
-    # Issue 3: Vacation Time
-    vac_days = re.search(r'\b(\d{1,2})\s*(day|days|week|weeks)\b', lower)
-    if ('vacation' in lower or 'pto' in lower or 'time off' in lower) and vac_days:
-        qty = vac_days.group(1)
-        unit = vac_days.group(2)
-        updates['issue-3'] = f"{qty} {unit}"
-
-    # Issue 4: Starting Date
-    if month_day and ('start' in lower or 'starting date' in lower or 'date' in lower):
-        updates['issue-4'] = month_day.group(0)
-
-    # Issue 5: Moving Expense Coverage
-    if 'moving' in lower or 'relocation' in lower:
-        if percent:
-            updates['issue-5'] = re.sub(r'\s+', '', percent.group(0))
-        elif 'full' in lower and 'cover' in lower:
-            updates['issue-5'] = 'Full coverage'
-        elif 'no' in lower and 'cover' in lower:
-            updates['issue-5'] = 'No coverage'
-
-    # Issue 6: Insurance Coverage
-    if 'insurance' in lower:
-        if percent:
-            updates['issue-6'] = re.sub(r'\s+', '', percent.group(0))
-        else:
-            plan = re.search(r'\bplan\s*([a-e])\b', lower)
-            if plan:
-                updates['issue-6'] = f"Plan {plan.group(1).upper()}"
-
-    # Issue 7: Salary
-    if ('salary' in lower or 'pay' in lower or 'compensation' in lower) and money:
-        updates['issue-7'] = re.sub(r'\s+', '', money.group(0))
-
-    # Issue 8: Location
-    city_map = {
-        'san francisco': 'San Francisco',
-        'atlanta': 'Atlanta',
-        'chicago': 'Chicago',
-        'boston': 'Boston',
-        'new york': 'New York',
+    payload = {
+        'model': 'gpt-4o-mini',
+        'messages': [
+            {'role': 'system', 'content': prompt},
+            {'role': 'user', 'content': str(message)}
+        ],
+        'temperature': 0.0,
+        'max_tokens': 250
     }
-    for city_key, city_label in city_map.items():
-        if city_key in lower and ('location' in lower or 'based in' in lower or 'in ' + city_key in lower):
-            updates['issue-8'] = city_label
-            break
 
-    return updates
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {openai_api_key}'
+    }
+
+    try:
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=8)
+        if resp.status_code != 200:
+            print(f"[INFO] LLM issue-update extraction returned {resp.status_code}, skipping updates")
+            return {}
+
+        raw = resp.json()['choices'][0]['message']['content']
+        content = str(raw).strip()
+
+        if content.startswith('```'):
+            content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.IGNORECASE)
+            content = re.sub(r'\s*```$', '', content)
+
+        parsed = None
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            obj_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if obj_match:
+                parsed = json.loads(obj_match.group(0))
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        updates_list = parsed.get('updates')
+        if not isinstance(updates_list, list):
+            return {}
+
+        updates = {}
+        for item in updates_list:
+            if not isinstance(item, dict):
+                continue
+
+            issue_id = str(item.get('id', '')).strip().lower()
+            if issue_id not in id_to_label:
+                # allow model to return label when id is missing
+                issue_label = _norm_key(item.get('label', ''))
+                issue_id = label_to_id.get(issue_label, '')
+
+            if not issue_id:
+                continue
+
+            status = item.get('status', '')
+            status = str(status).strip() if status is not None else ''
+            if status:
+                updates[issue_id] = status
+
+        return updates
+
+    except Exception as e:
+        print(f"[INFO] LLM issue-update extraction exception: {e}")
+        return {}
 
 
 def extract_issue_statuses_from_history(conversation_history, openai_api_key=None):
@@ -285,12 +270,19 @@ def extract_issue_statuses_from_history(conversation_history, openai_api_key=Non
     merged = [dict(item) for item in defaults]
     id_to_index = {item['id']: idx for idx, item in enumerate(merged)}
 
+    if not openai_api_key:
+        openai_api_key = os.getenv('OPENAI_API_KEY') or os.getenv('openai_api_key')
+
     try:
         for msg in conversation_history:
             if msg.get('role') != 'assistant':
                 continue
 
-            updates = _extract_issue_updates_from_message(msg.get('content', ''))
+            content = msg.get('content', '')
+
+            # LLM-only extraction.
+            updates = _extract_issue_updates_from_message_llm(content, openai_api_key)
+
             for issue_id, status in updates.items():
                 idx = id_to_index.get(issue_id)
                 if idx is None:
