@@ -12,137 +12,10 @@ import json
 import os      # Used for accessing environment variables (API keys, config)
 import requests # Used for making HTTP requests to the OpenAI API
 import html
-import re      # For regex-based offer extraction
+import re      # For parsing model JSON/code-fence responses
 
 # Initialize the Flask application
 app = Flask(__name__)
-
-# --- Offer Extraction Functions ---
-
-def _empty_offer_result(message, role='assistant'):
-    return {
-        'has_offer': False,
-        'role': role,
-        'raw_message': message,
-        'keywords': [],
-        'numeric_values': [],
-        'offer_phrases': [],
-        'extraction_method': 'ai_only'
-    }
-
-def extract_offers_from_message(message, role='user'):
-    """
-    Extracts negotiation offers from a message using AI analysis.
-    Uses AI-only extraction. If the AI call fails or no API key is configured,
-    returns an empty result so only model-derived offers are surfaced.
-    
-    Returns a dictionary with extracted offer components:
-    {
-        'has_offer': bool,
-        'raw_message': str,
-        'offer_summary': str,
-        'numeric_values': list,
-        'keywords': list,
-        'extraction_method': 'ai'
-    }
-    """
-    try:
-        # Get OpenAI API key
-        openai_api_key = (
-            os.getenv('OPENAI_API_KEY') or
-            os.getenv('openai_api_key')
-        )
-        
-        if not openai_api_key:
-            print("[INFO] OpenAI API key not available, skipping offer extraction")
-            return _empty_offer_result(message, role)
-        
-        # Call OpenAI to extract offers
-        openai_url = 'https://api.openai.com/v1/chat/completions'
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {openai_api_key}'
-        }
-        
-        # System prompt to instruct LLM on offer extraction
-        system_prompt = """You are an expert negotiation analyst. Extract and summarize any negotiation offers, proposals, bids, or counter-offers from the given message.
-
-Respond in JSON format with:
-{
-    "has_offer": true/false,
-    "offer_summary": "brief summary of the offer or empty string",
-    "numeric_values": ["$500", "20%", etc],
-    "keywords": ["offer", "propose", "price", etc],
-    "negotiation_elements": ["any special terms, conditions, or constraints mentioned"]
-}
-
-Focus on understanding the intent and meaning, not just keyword matching. Consider implicit offers and nuanced language."""
-        
-        payload = {
-            'model': 'gpt-4o-mini',  # Use a faster model for quick extraction
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': message}
-            ],
-            'temperature': 0.3,  # Lower temp for more consistent extraction
-            'max_tokens': 500
-        }
-        
-        response_openai = requests.post(openai_url, headers=headers, json=payload, timeout=10)
-        
-        if response_openai.status_code == 200:
-            resp_json = response_openai.json()
-            response_text = resp_json['choices'][0]['message']['content']
-            
-            # Parse the JSON response from the AI
-            extracted_data = json.loads(response_text)
-            
-            # Ensure all expected fields are present
-            result = {
-                'has_offer': extracted_data.get('has_offer', False),
-                'role': role,
-                'raw_message': message,
-                'offer_summary': extracted_data.get('offer_summary', ''),
-                'numeric_values': extracted_data.get('numeric_values', []),
-                'keywords': extracted_data.get('keywords', []),
-                'offer_phrases': [extracted_data.get('offer_summary', '')] if extracted_data.get('offer_summary') else [],
-                'extraction_method': 'ai'
-            }
-            
-            return result
-        else:
-            # If API call fails, fall back to rule-based
-            print(f"[INFO] OpenAI API error ({response_openai.status_code}), skipping offer extraction")
-            return _empty_offer_result(message, role)
-            
-    except (json.JSONDecodeError, KeyError, requests.exceptions.RequestException, Exception) as e:
-        # Any error → return an empty result so only AI-derived offers are shown
-        print(f"[INFO] Error in AI extraction ({type(e).__name__}), skipping offer extraction: {e}")
-        return _empty_offer_result(message, role)
-
-def get_latest_offers(conversation_history):
-    """
-    Analyzes conversation history to extract the latest offers from both user and assistant.
-    Returns a structured summary of the most recent offers from each side.
-    """
-    assistant_offers = []
-    
-    for msg in conversation_history:
-        if msg.get('role') == 'assistant':
-            offer_data = extract_offers_from_message(msg.get('content', ''), 'assistant')
-            if offer_data['has_offer']:
-                assistant_offers.append(offer_data)
-    
-    # Get the latest offer from each side
-    latest_assistant_offer = assistant_offers[-1] if assistant_offers else None
-    
-    return {
-        'user_latest_offer': None,
-        'assistant_latest_offer': latest_assistant_offer,
-        'user_offer_count': 0,
-        'assistant_offer_count': len(assistant_offers),
-    }
-
 
 def _default_issue_statuses():
     return [
@@ -280,10 +153,8 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
 
 def extract_issue_statuses_from_history(conversation_history, openai_api_key=None):
     """
-    Analyze assistant messages in order and incrementally update issue slots.
-    Only issues explicitly updated in a message are changed; all other slots are kept
-    as-is. This prevents unrelated slots from being wiped when a new message only
-    discusses one or two issues.
+    Analyze assistant messages and update issue slots.
+    Uses a single extraction call per request cycle to reduce redundant LLM usage.
 
     Returned format:
     [
@@ -299,21 +170,28 @@ def extract_issue_statuses_from_history(conversation_history, openai_api_key=Non
         openai_api_key = os.getenv('OPENAI_API_KEY') or os.getenv('openai_api_key')
 
     try:
-        for msg in conversation_history:
-            if msg.get('role') != 'assistant':
+        assistant_messages = [
+            str(msg.get('content', '')).strip()
+            for msg in conversation_history
+            if msg.get('role') == 'assistant' and str(msg.get('content', '')).strip()
+        ]
+
+        if not assistant_messages:
+            return merged
+
+        # Single LLM call using the assistant transcript to infer the latest value per issue.
+        transcript = "\n\n".join(
+            f"Assistant turn {idx + 1}: {content}"
+            for idx, content in enumerate(assistant_messages)
+        )
+        updates = _extract_issue_updates_from_message_llm(transcript, openai_api_key)
+
+        for issue_id, status in updates.items():
+            idx = id_to_index.get(issue_id)
+            if idx is None:
                 continue
-
-            content = msg.get('content', '')
-
-            # LLM-only extraction.
-            updates = _extract_issue_updates_from_message_llm(content, openai_api_key)
-
-            for issue_id, status in updates.items():
-                idx = id_to_index.get(issue_id)
-                if idx is None:
-                    continue
-                if status:
-                    merged[idx]['status'] = status
+            if status:
+                merged[idx]['status'] = status
 
         return merged
 
@@ -659,16 +537,12 @@ def lucid():
                         # Extract the generated text content safely
                         generated_text = resp_json['choices'][0]['message']['content']
 
-                        # Extract offers from the conversation INCLUDING the new AI response (NEGOTIATION FEATURE)
-                        # This ensures offers from the AI's latest response are immediately visible
                         messages_with_ai_response = messages + [{'role': 'assistant', 'content': generated_text}]
-                        offers_data = get_latest_offers(messages_with_ai_response)
 
                         # Prepare the successful response data for Qualtrics frontend
                         response_data = {
                             'generated_text': generated_text,
-                            'used_temperature': used_temperature, # Echo back parameters used
-                            'offers': offers_data  # Include extracted offer data
+                            'used_temperature': used_temperature # Echo back parameters used
                         }
                         # Also extract issue statuses (AI-driven when API key present; otherwise defaults)
                         try:
