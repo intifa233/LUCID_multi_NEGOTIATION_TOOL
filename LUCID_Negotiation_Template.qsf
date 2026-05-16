@@ -154,6 +154,77 @@
                     "DataVisibility": [],
                     "AnalyzeText": false
                   },
+                  {
+                    "Description": "LUCIDIssueStatusesJSON",
+                    "Type": "Recipient",
+                    "Field": "LUCIDIssueStatusesJSON",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_1_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_1_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_2_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_2_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_3_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_3_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_4_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_4_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_5_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_5_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_6_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_6_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_7_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_7_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
+                  },
+                  {
+                    "Description": "LUCID_Issue_8_Status",
+                    "Type": "Recipient",
+                    "Field": "LUCID_Issue_8_Status",
+                    "VariableType": "String",
+                    "DataVisibility": [],
+                    "AnalyzeText": false
                   }
                 ]
               }
