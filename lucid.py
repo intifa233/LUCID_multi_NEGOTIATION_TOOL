@@ -59,15 +59,18 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
     label_to_id.update(label_aliases)
 
     prompt = (
-        "You extract structured negotiation issue updates from ONE assistant message. "
-        "The message may contain markdown (**bold**), numbering, bullet points, or compact formatting. "
-        "Identify ONLY issues explicitly updated in this message, and ignore issues not updated here. "
+        "You extract the current status of negotiation issues from an assistant transcript. "
+        "The transcript may contain multiple assistant turns. "
+        "For each issue, find the MOST RECENT concrete value mentioned anywhere in the transcript. "
+        "Include ALL issues that have any concrete value mentioned — do NOT skip issues just because "
+        "their value did not change between turns. "
+        "The text may contain markdown (**bold**), bullet points, dashes, or compact formatting. "
         "Issue IDs and labels are: "
         "issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation Time, issue-4 Starting Date, "
         "issue-5 Moving Expense Coverage, issue-6 Insurance Coverage, issue-7 Salary, issue-8 Location. "
         "Return ONLY valid JSON in this exact shape: "
         "{\"updates\":[{\"id\":\"issue-1\",\"label\":\"Bonus\",\"status\":\"4%\"}]}. "
-        "Use ids whenever possible. Preserve exact values from the message (e.g., Division A, Plan E, August 1, $82,000, 60%). "
+        "Use ids whenever possible. Preserve exact values (e.g., Division A, Plan E, August 1, $82,000, 60%). "
         "Do not include entries with empty status."
     )
 
@@ -82,7 +85,7 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
             {'role': 'user', 'content': cleaned_message}
         ],
         'temperature': 0.0,
-        'max_tokens': 400,
+        'max_tokens': 600,
         'response_format': {'type': 'json_object'}
     }
 
