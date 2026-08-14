@@ -12,9 +12,7 @@ import json
 import os      # Used for accessing environment variables (API keys, config)
 import requests # Used for making HTTP requests to the OpenAI API
 import html
-import re      # For parsing model JSON/code-fence responses
 import yaml    # For loading per-condition negotiation prompts from prompts.yaml
-from datetime import datetime, timezone  # For timestamping offer-trajectory entries
 
 # Initialize the Flask application
 app = Flask(__name__)
@@ -27,10 +25,6 @@ def _load_condition_prompts():
     start. This lets the Prosocial/Proself prompt text be edited and redeployed
     independently of the Qualtrics .qsf file - no re-import into Qualtrics needed,
     and no risk of breaking anything else in the survey while editing a prompt.
-
-    Note: this is separate from, and does not affect, the issue-tracking/extraction
-    prompt in _extract_issue_updates_from_message_llm() below - that one stays
-    hardcoded here.
 
     Returns {} (feature silently disabled, falls back to whatever prompt the
     frontend sends) if the file is missing or malformed, so a bad/missing YAML
@@ -48,220 +42,94 @@ def _load_condition_prompts():
 
 CONDITION_PROMPTS = _load_condition_prompts()
 
-def _default_issue_statuses():
-    return [
-        {'id': 'issue-1', 'label': 'Bonus', 'status': ''},
-        {'id': 'issue-2', 'label': 'Job Assignment', 'status': ''},
-        {'id': 'issue-3', 'label': 'Vacation Time', 'status': ''},
-        {'id': 'issue-4', 'label': 'Starting Date', 'status': ''},
-        {'id': 'issue-5', 'label': 'Moving Expense Coverage', 'status': ''},
-        {'id': 'issue-6', 'label': 'Insurance Coverage', 'status': ''},
-        {'id': 'issue-7', 'label': 'Salary', 'status': ''},
-        {'id': 'issue-8', 'label': 'Location', 'status': ''},
-    ]
+# --- Offer Extraction ---
 
+def _empty_turn_offer(role, raw_message):
+    return {'has_offer': False, 'role': role, 'raw_message': raw_message or '', 'offer_value': ''}
 
-def _extract_issue_updates_from_message_llm(message, openai_api_key):
+def get_turn_offers(user_message, assistant_message):
     """
-    Use an LLM to extract issue updates from a single assistant message.
-    Returns a dict like {'issue-1': '4%', 'issue-7': '$84,000'}.
-    Returns {} on any failure.
+    Extracts offers for THIS negotiation turn ONLY, in a single OpenAI call
+    that looks at the user message which triggered this request and the
+    assistant's brand-new response together. No rule-based fallback and no
+    per-side call - one LLM call, one JSON result covering both sides.
+
+    Deliberately ignores the rest of the conversation history, so a round
+    where nobody restates a price doesn't "inherit" a stale offer value from
+    somewhere earlier in the chat - that side just comes back with
+    has_offer=False (and the frontend records 'None' for that turn).
     """
-    if not message or not openai_api_key:
-        return {}
+    user_message = user_message or ''
+    assistant_message = assistant_message or ''
 
-    def _norm_key(text):
-        return ''.join(ch for ch in str(text).lower() if ch.isalnum())
-
-    defaults = _default_issue_statuses()
-    id_to_label = {item['id']: item['label'] for item in defaults}
-    label_to_id = {_norm_key(item['label']): item['id'] for item in defaults}
-    # Common label variants that appear in assistant messages
-    label_aliases = {
-        'movingexpense': 'issue-5',
-        'movingexpensecovered': 'issue-5',
-        'movingexpensecoverage': 'issue-5',
-        'insurance': 'issue-6',
-        'insurancecovered': 'issue-6',
-        'insurancecoverage': 'issue-6',
-        'startdate': 'issue-4',
-        'jobassignmentdivision': 'issue-2',
+    result = {
+        'user_latest_offer': _empty_turn_offer('user', user_message),
+        'assistant_latest_offer': _empty_turn_offer('assistant', assistant_message),
     }
-    label_to_id.update(label_aliases)
 
-    prompt = (
-        "You extract the current status of negotiation issues from an assistant transcript. "
-        "The transcript may contain multiple assistant turns. "
-        "For each issue, find the MOST RECENT concrete value mentioned anywhere in the transcript. "
-        "Include ALL issues that have any concrete value mentioned — do NOT skip issues just because "
-        "their value did not change between turns. "
-        "The text may contain markdown (**bold**), bullet points, dashes, or compact formatting. "
-        "Issue IDs and labels are: "
-        "issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation Time, issue-4 Starting Date, "
-        "issue-5 Moving Expense Coverage, issue-6 Insurance Coverage, issue-7 Salary, issue-8 Location. "
-        "Return ONLY valid JSON in this exact shape: "
-        "{\"updates\":[{\"id\":\"issue-1\",\"label\":\"Bonus\",\"status\":\"4%\"}]}. "
-        "Use ids whenever possible. Preserve exact values (e.g., Division A, Plan E, August 1, $82,000, 60%). "
-        "Do not include entries with empty status."
+    if not user_message.strip() and not assistant_message.strip():
+        return result  # nothing said by either side this turn - skip the call entirely
+
+    openai_api_key = os.getenv('OPENAI_API_KEY') or os.getenv('openai_api_key')
+    if not openai_api_key:
+        print("[WARN] OpenAI API key not available, cannot extract offers this turn")
+        return result
+
+    system_prompt = """You are an expert negotiation analyst. You will be shown the USER's message and the ASSISTANT's message from ONE turn of a negotiation. For each of them independently, determine whether they are proposing a concrete offer/price/counter-offer IN THAT MESSAGE.
+
+Respond in JSON format with:
+{
+    "user_offer_value": "the single absolute value the USER is proposing in THIS message, formatted like '$450' or '20%'. Use ONLY an amount actually being offered/proposed/countered right now - ignore incidental numbers used only as background context (e.g. an original purchase price, a past cost, a quantity). Empty string if the user's message contains no concrete offer.",
+    "assistant_offer_value": "the same, but for the ASSISTANT's message. Empty string if the assistant's message contains no concrete offer."
+}
+
+Focus on understanding intent and meaning, not just keyword matching. Consider implicit offers and nuanced language. A message can easily contain no offer at all - don't force a value if none was really proposed."""
+
+    turn_content = (
+        f"USER MESSAGE:\n{user_message if user_message.strip() else '(nothing said this turn)'}\n\n"
+        f"ASSISTANT MESSAGE:\n{assistant_message if assistant_message.strip() else '(nothing said this turn)'}"
     )
 
-    cleaned_message = str(message)
-    cleaned_message = cleaned_message.replace('**', '')
-    cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
-
-    payload = {
-        'model': 'gpt-4o-mini',
-        'messages': [
-            {'role': 'system', 'content': prompt},
-            {'role': 'user', 'content': cleaned_message}
-        ],
-        'temperature': 0.0,
-        'max_tokens': 600,
-        'response_format': {'type': 'json_object'}
-    }
-
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {openai_api_key}'
-    }
-
     try:
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=12)
-        if resp.status_code != 200:
-            print(f"[INFO] LLM issue-update extraction returned {resp.status_code}, skipping updates")
-            return {}
+        response_openai = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {openai_api_key}'
+            },
+            json={
+                'model': 'gpt-4o-mini',  # fast/cheap model for a single lightweight extraction call
+                'messages': [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': turn_content}
+                ],
+                'temperature': 0.0,  # deterministic extraction
+                'max_tokens': 150,
+                'response_format': {'type': 'json_object'}
+            },
+            timeout=10
+        )
 
-        raw = resp.json()['choices'][0]['message']['content']
-        content = str(raw).strip()
+        if response_openai.status_code == 200:
+            response_text = response_openai.json()['choices'][0]['message']['content']
+            extracted_data = json.loads(response_text)
 
-        if content.startswith('```'):
-            content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.IGNORECASE)
-            content = re.sub(r'\s*```$', '', content)
+            user_value = (extracted_data.get('user_offer_value') or '').strip()
+            assistant_value = (extracted_data.get('assistant_offer_value') or '').strip()
 
-        parsed = None
-        try:
-            parsed = json.loads(content)
-        except Exception:
-            obj_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if obj_match:
-                parsed = json.loads(obj_match.group(0))
+            result['user_latest_offer'] = {
+                'has_offer': bool(user_value), 'role': 'user', 'raw_message': user_message, 'offer_value': user_value
+            }
+            result['assistant_latest_offer'] = {
+                'has_offer': bool(assistant_value), 'role': 'assistant', 'raw_message': assistant_message, 'offer_value': assistant_value
+            }
+        else:
+            print(f"[WARN] OpenAI error extracting offers ({response_openai.status_code}): {response_openai.text}")
 
-        if not isinstance(parsed, dict):
-            return {}
+    except (json.JSONDecodeError, KeyError, IndexError, requests.exceptions.RequestException) as e:
+        print(f"[WARN] Error extracting offers ({type(e).__name__}): {e}")
 
-        updates_list = parsed.get('updates')
-        if isinstance(updates_list, dict):
-            # Also accept shape: {"updates": {"issue-1": "4%", ...}}
-            updates_list = [
-                {'id': issue_id, 'status': status}
-                for issue_id, status in updates_list.items()
-            ]
-        if not isinstance(updates_list, list):
-            return {}
-
-        updates = {}
-        for item in updates_list:
-            if not isinstance(item, dict):
-                continue
-
-            issue_id = str(item.get('id', '')).strip().lower()
-            if issue_id not in id_to_label:
-                # allow model to return label when id is missing
-                issue_label = _norm_key(item.get('label', ''))
-                issue_id = label_to_id.get(issue_label, '')
-
-            if not issue_id:
-                continue
-
-            status = item.get('status', '')
-            status = str(status).strip() if status is not None else ''
-            if status:
-                updates[issue_id] = status
-
-        return updates
-
-    except Exception as e:
-        print(f"[INFO] LLM issue-update extraction exception: {e}")
-        return {}
-
-
-def _normalize_prior_issue_statuses(raw):
-    """
-    Coerce whatever issue-status snapshot the frontend sent back (echoed from a
-    previous response, read out of Qualtrics Embedded Data) into the canonical
-    8-slot list. Falls back to empty defaults if 'raw' is missing or malformed,
-    so a first turn (or an older frontend that doesn't send this field yet)
-    degrades gracefully instead of erroring.
-    """
-    defaults = _default_issue_statuses()
-    if not isinstance(raw, list) or not raw:
-        return defaults
-
-    by_id = {}
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        issue_id = str(item.get('id') or '').strip().lower() or f'issue-{idx + 1}'
-        by_id[issue_id] = str(item.get('status') or '').strip()
-
-    return [
-        {'id': item['id'], 'label': item['label'], 'status': by_id.get(item['id'], '')}
-        for item in defaults
-    ]
-
-
-def apply_issue_updates(base_statuses, updates):
-    """
-    Overlay a {issue_id: status} updates dict onto a base 8-slot issue-status
-    list, returning a new list. Unmentioned issues keep their prior value;
-    only non-empty updates overwrite.
-    """
-    result = [dict(item) for item in base_statuses]
-    id_to_index = {item['id']: idx for idx, item in enumerate(result)}
-    for issue_id, status in (updates or {}).items():
-        idx = id_to_index.get(issue_id)
-        if idx is None or not status:
-            continue
-        result[idx]['status'] = status
     return result
-
-
-def diff_issue_statuses(prior_statuses, new_statuses):
-    """
-    Compare two 8-slot issue-status lists and return only the issues whose
-    value actually changed, e.g. {"issue-7": {"label": "Salary", "from": "$82,000", "to": "$85,000"}}.
-    This is the per-round "what moved" signal that a single latest-value
-    snapshot can't provide.
-    """
-    prior_by_id = {item['id']: (item.get('status') or '').strip() for item in prior_statuses}
-    changed = {}
-    for item in new_statuses:
-        issue_id = item['id']
-        old_val = prior_by_id.get(issue_id, '')
-        new_val = (item.get('status') or '').strip()
-        if new_val and new_val != old_val:
-            changed[issue_id] = {'label': item.get('label', ''), 'from': old_val, 'to': new_val}
-    return changed
-
-
-def build_issue_trajectory_entry(turn_number, user_message, assistant_message,
-                                  prior_statuses, user_updates, assistant_updates, merged_statuses):
-    """
-    Package one round's worth of multi-issue trade-off signal: who said what,
-    what each side's message contributed, and what changed vs. the prior
-    snapshot. Appending one of these per round (frontend-side) builds the full
-    negotiation trajectory instead of only ever exposing the latest state.
-    """
-    return {
-        'turn_number': turn_number,
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'user_message_excerpt': (user_message or '')[:500],
-        'assistant_message_excerpt': (assistant_message or '')[:500],
-        'user_updates': user_updates or {},
-        'assistant_updates': assistant_updates or {},
-        'changed_from_prior': diff_issue_statuses(prior_statuses, merged_statuses),
-        'issues': merged_statuses,
-    }
 
 # --- Configuration & CORS ---
 
@@ -551,12 +419,11 @@ def lucid():
                 status_code = 400 # Bad Request
             else:
                 # --- Required: resolve the system prompt from prompts.yaml via condition ---
-                # prompts.yaml is now the single source of truth for what the AI recruiter
-                # says. The LUCIDPromptInitial value in the .qsf is no longer used for this -
-                # the frontend may still send it as messages[0], but it's overwritten below.
-                # This endpoint requires a recognized `condition` field with a matching
-                # prompts.yaml entry, and returns an error instead of silently falling back
-                # to a stale or missing prompt.
+                # prompts.yaml is now the single source of truth for what the AI says.
+                # LUCIDPromptInitial in the .qsf is no longer used - the frontend may still
+                # send it, but it's ignored here. This endpoint requires a recognized
+                # `condition` field with a matching prompts.yaml entry, and returns an error
+                # instead of silently falling back to a stale or missing prompt.
                 condition = body.get('condition')
                 condition_key = str(condition).strip().lower() if condition else None
                 condition_prompt = CONDITION_PROMPTS.get(condition_key) if condition_key else None
@@ -594,33 +461,28 @@ def lucid():
                         except (ValueError, TypeError): print(f"[WARN /lucid] Invalid seed format ('{seed_from_frontend}'), using default (None).") # Vercel Log
                     print(f"[INFO /lucid] Using seed: {used_seed}") # Vercel Log
 
-                    # Determine which round this submission is. Used both to tell the model
-                    # where it actually is in the negotiation (below) and later to timestamp
-                    # the offer-trajectory entry. Prefer what the frontend sends (it tracks
-                    # this authoritatively via turnNumber); fall back to counting completed
-                    # assistant turns already in the transcript if that's missing.
-                    turn_number = body.get('turn_number')
-                    if not isinstance(turn_number, int):
-                        turn_number = sum(1 for m in messages if m.get('role') == 'assistant') + 1
-                    print(f"[INFO /lucid] Current round: {turn_number}") # Vercel Log
-
                     # --- Step 4: Call OpenAI API ---
                     openai_url = 'https://api.openai.com/v1/chat/completions'
                     headers = {
                         'Content-Type': 'application/json',
                         'Authorization': f'Bearer {openai_api_key}' # Use API key for authorization
                     }
-                    # Tell the model what round it's on rather than making it count turns in its
-                    # own context (unreliable, especially with reinforcement-prompt system messages
-                    # interspersed) - the system prompt's concession-pacing schedule ("hold rounds
-                    # 1-3, move by round 6, ...") is only usable if the model has ground truth on
-                    # where it is. Appended fresh each call, right after the latest user message for
-                    # maximum salience - NOT persisted back to the frontend's conversation history,
-                    # so it never pollutes the stored transcript or duplicates across turns.
-                    messages_for_api = messages + [{
-                        'role': 'system',
-                        'content': f"[System note: this is round {turn_number} of the negotiation. Pace your concessions accordingly, per your instructions.]"
-                    }]
+
+                    # Tell the model what round of the negotiation this is. Derived from the
+                    # message history itself (count of 'user' messages, including the one that
+                    # triggered this request) rather than trusting a client-supplied counter, so
+                    # it can't drift out of sync. Appended as the LAST message so it's the most
+                    # recent/salient context the model sees before generating - after any
+                    # frontend-injected reinforcement message.
+                    current_round = sum(1 for m in messages if isinstance(m, dict) and m.get('role') == 'user')
+                    round_limit = body.get('round_limit')  # optional - only present if the frontend sends it
+                    if round_limit:
+                        round_context = f"[SYSTEM CONTEXT: This is round {current_round} out of {round_limit} in this negotiation.]"
+                    else:
+                        round_context = f"[SYSTEM CONTEXT: This is round {current_round} of this negotiation.]"
+                    messages_for_api = messages + [{'role': 'system', 'content': round_context}]
+                    print(f"[INFO /lucid] Injected round context: {round_context}") # Vercel Log
+
                     # Construct payload for OpenAI
                     data_payload = {
                         'model': model,
@@ -649,48 +511,22 @@ def lucid():
                             # Extract the generated text content safely
                             generated_text = resp_json['choices'][0]['message']['content']
 
+                            # Extract offers for THIS turn only (NEGOTIATION FEATURE): the user message
+                            # that triggered this request, and the assistant's brand-new response.
+                            # We intentionally do not rescan the whole history - see get_turn_offers().
+                            latest_user_text = ''
+                            for m in reversed(messages):
+                                if m.get('role') == 'user':
+                                    latest_user_text = m.get('content', '')
+                                    break
+                            offers_data = get_turn_offers(latest_user_text, generated_text)
+
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
                                 'generated_text': generated_text,
-                                'used_temperature': used_temperature # Echo back parameters used
+                                'used_temperature': used_temperature, # Echo back parameters used
+                                'offers': offers_data  # Include extracted offer data
                             }
-                            # --- Multi-issue offer tracking (per-round, both speakers) ---
-                            # The frontend echoes back the last snapshot it persisted (body['issue_statuses'])
-                            # so each round only needs to look at THIS round's two new messages (cheap, constant
-                            # cost per turn) instead of re-scanning the whole growing transcript. We extract the
-                            # human's proposal and the AI's reply separately so trade-offs from either side are
-                            # captured, then diff the merged result against the prior snapshot to see what moved.
-                            try:
-                                prior_issue_statuses = _normalize_prior_issue_statuses(body.get('issue_statuses'))
-
-                                latest_user_message = ''
-                                for msg in reversed(messages):
-                                    if msg.get('role') == 'user':
-                                        latest_user_message = str(msg.get('content', ''))
-                                        break
-
-                                user_updates = (
-                                    _extract_issue_updates_from_message_llm(latest_user_message, openai_api_key)
-                                    if latest_user_message else {}
-                                )
-                                assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-
-                                # Apply the human's proposal first, then the AI's reply layered on top, since the
-                                # AI responds to (and may confirm, counter, or ignore) what was just proposed.
-                                merged_statuses = apply_issue_updates(prior_issue_statuses, user_updates)
-                                merged_statuses = apply_issue_updates(merged_statuses, assistant_updates)
-
-                                # turn_number was already computed above (Step 4) so the round-context
-                                # note sent to the model and the trajectory entry logged here agree.
-                                response_data['issue_statuses'] = merged_statuses
-                                response_data['issue_trajectory_entry'] = build_issue_trajectory_entry(
-                                    turn_number, latest_user_message, generated_text,
-                                    prior_issue_statuses, user_updates, assistant_updates, merged_statuses
-                                )
-                            except Exception as e:
-                                print(f"[WARN /lucid] Failed to extract issue_statuses/trajectory: {e}")
-                                response_data['issue_statuses'] = []
-                                response_data['issue_trajectory_entry'] = None
                             if used_seed is not None:
                                 response_data['used_seed'] = used_seed # Echo back seed if used
 
@@ -771,7 +607,6 @@ if __name__ == '__main__':
     # os.environ['VERCEL_URL'] = 'localhost:8080' # Example for testing the root page
 
     # Run the Flask development server
-    # Debug mode is controlled via the FLASK_DEBUG environment variable (DO NOT enable in production)
-    debug_mode = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+    # Debug=True enables auto-reloading and provides detailed error pages (DO NOT use in production)
     local_port = int(os.getenv('PORT', 8080)) # Use PORT env var if set, otherwise default to 8080
-    app.run(debug=debug_mode, port=local_port, host='0.0.0.0') # Host 0.0.0.0 makes it accessible on network
+    app.run(debug=True, port=local_port, host='0.0.0.0') # Host 0.0.0.0 makes it accessible on network
