@@ -675,10 +675,14 @@ def lucid():
                                 )
                                 assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
 
-                                # Apply the human's proposal first, then the AI's reply layered on top, since the
-                                # AI responds to (and may confirm, counter, or ignore) what was just proposed.
-                                merged_statuses = apply_issue_updates(prior_issue_statuses, user_updates)
-                                merged_statuses = apply_issue_updates(merged_statuses, assistant_updates)
+                                # The displayed/tracked "current offer" snapshot reflects only what the AI
+                                # actually said or agreed to - NOT the participant's unilateral ask. A user
+                                # proposing "$95,000" shouldn't make $95,000 show up as the current offer on
+                                # the panel (or in the trajectory's `issues` state) unless the AI mentioned it
+                                # back. user_updates is still extracted and recorded on the trajectory entry
+                                # below (so what the participant asked for is never lost for analysis) - it
+                                # just doesn't feed the merged/displayed snapshot.
+                                merged_statuses = apply_issue_updates(prior_issue_statuses, assistant_updates)
 
                                 # turn_number was already computed above (Step 4) so the round-context
                                 # note sent to the model and the trajectory entry logged here agree.
