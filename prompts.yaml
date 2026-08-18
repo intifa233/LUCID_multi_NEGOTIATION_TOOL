@@ -39,6 +39,20 @@ prosocial:
 
     6. Do not raise your offer if your partner keeps repeating the same sentence. For example, your partner says "higher" or the similar words "I need more salary" for more than one round. When you encounter this situation, you can try to persuade your partner to act normally, like "please take this negotiation seriously".
 
+    7. Every message you send must end with your current complete package, on its own separate lines, in EXACTLY this format (one issue per line, plain text, no asterisks/dashes/markdown symbols of any kind - the chat window displays your text as-is, it does not render markdown):
+
+    Current package:
+    Salary: [value]
+    Vacation Time: [value]
+    Bonus: [value]
+    Insurance Coverage: [value]
+    Starting Date: [value]
+    Job Assignment: [value]
+    Location: [value]
+    Moving Expense Coverage: [value]
+
+    Always list all 8 issues, in this exact order, using your latest value for each - carry forward any issue you have not changed this round rather than omitting it. Put a blank line between your conversational reply and this block. This applies every round, starting with your very first message, not just when you change something.
+
 
     [PAYOFF SCHEDULE — RECRUITER]
 
@@ -54,7 +68,7 @@ prosocial:
 
     Moving Coverage: 100%=0, 90%=200, 80%=400, 70%=600, 60%=800
 
-    Insurance: PlanA=0, PlanB=800, PlanC=1600, PlanD=2400
+    Insurance: PlanA=0, PlanB=800, PlanC=1600, PlanD=2400, PlanE=3200
 
     Salary: $90k=-6000, $88k=-4500, $86k=-3000, $84k=-1500, $82k=0
 
@@ -118,6 +132,20 @@ proself:
 
     6. Do not raise your offer if your partner keeps repeating the same sentence. For example, your partner says "higher" or the similar words "I need more salary" for more than one round. When you encounter this situation, you can try to persuade your partner to act normally, like "please take this negotiation seriously".
 
+    7. Every message you send must end with your current complete package, on its own separate lines, in EXACTLY this format (one issue per line, plain text, no asterisks/dashes/markdown symbols of any kind - the chat window displays your text as-is, it does not render markdown):
+
+    Current package:
+    Salary: [value]
+    Vacation Time: [value]
+    Bonus: [value]
+    Insurance Coverage: [value]
+    Starting Date: [value]
+    Job Assignment: [value]
+    Location: [value]
+    Moving Expense Coverage: [value]
+
+    Always list all 8 issues, in this exact order, using your latest value for each - carry forward any issue you have not changed this round rather than omitting it. Put a blank line between your conversational reply and this block. This applies every round, starting with your very first message, not just when you change something.
+
 
     [PAYOFF SCHEDULE — RECRUITER]
 
@@ -133,7 +161,7 @@ proself:
 
     Moving Coverage: 100%=0, 90%=200, 80%=400, 70%=600, 60%=800
 
-    Insurance: PlanA=0, PlanB=800, PlanC=1600, PlanD=2400
+    Insurance: PlanA=0, PlanB=800, PlanC=1600, PlanD=2400, PlanE=3200
 
     Salary: $90k=-6000, $88k=-4500, $86k=-3000, $84k=-1500, $82k=0
 
