@@ -446,7 +446,7 @@
                             "VariableType": "String",
                             "DataVisibility": [],
                             "AnalyzeText": false,
-                            "Value": "Hello! Thank you for taking part in this negotiation exercise. You are the job candidate, and you will be negotiating a job offer with an AI recruiter across eight issues: bonus, job assignment, vacation time, starting date, moving expense coverage, insurance coverage, salary, and location. Your initial offer is as follow:"
+                            "Value": "Hi! I'll be representing the company in this negotiation, and I'm looking forward to finding an arrangement that works well for both of us. We have up to 10 rounds of back-and-forth to reach an agreement across all eight parts of the offer: bonus, job assignment, vacation time, starting date, moving expense coverage, insurance coverage, salary, and location. Here's where things currently stand \u2014 take a look below, and whenever you're ready, share your thoughts or send over a counter-offer."
                           }
                         ]
                       }
@@ -468,7 +468,7 @@
                             "VariableType": "String",
                             "DataVisibility": [],
                             "AnalyzeText": false,
-                            "Value": "AI"
+                            "Value": "Alex"
                           },
                           {
                             "Description": "LUCIDUserLabel",
@@ -660,7 +660,7 @@
                             "VariableType": "String",
                             "DataVisibility": [],
                             "AnalyzeText": false,
-                            "Value": "Hello! Thank you for taking part in this negotiation exercise. You are the job candidate, and you will be negotiating a job offer with an AI recruiter across eight issues: bonus, job assignment, vacation time, starting date, moving expense coverage, insurance coverage, salary, and location. Whenever you're ready, go ahead and make your opening offer or ask the recruiter a question to get started."
+                            "Value": "Hi! I'll be representing the company in this negotiation, and I'm looking forward to finding an arrangement that works well for both of us. We have up to 10 rounds of back-and-forth to reach an agreement across all eight parts of the offer: bonus, job assignment, vacation time, starting date, moving expense coverage, insurance coverage, salary, and location. Here's where things currently stand \u2014 take a look below, and whenever you're ready, share your thoughts or send over a counter-offer."
                           }
                         ]
                       }
@@ -682,7 +682,7 @@
                             "VariableType": "String",
                             "DataVisibility": [],
                             "AnalyzeText": false,
-                            "Value": "AI"
+                            "Value": "Alex"
                           },
                           {
                             "Description": "LUCIDUserLabel",
