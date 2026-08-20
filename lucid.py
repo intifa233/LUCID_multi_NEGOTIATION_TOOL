@@ -185,6 +185,128 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
         return {}
 
 
+def _detect_first_concession_llm(user_message, openai_api_key):
+    """
+    Used only for the Prosocial condition's one-time "first concession" exception
+    (see prompts.yaml [NEGOTIATION PROTOCOL]): judges whether the candidate's latest
+    message offers a TRADE - conceding on one issue specifically to ask the recruiter
+    to move on a different one - and if so, which issue they're asking the recruiter
+    to move on. This is a separate, cheap classification call rather than something
+    the model is asked to track itself, because "has the candidate ever conceded
+    before this point in the conversation" requires scanning arbitrarily far back in
+    history - exactly the kind of long-range self-tracking LLMs are unreliable at
+    (worse than the round-counting problem solved elsewhere by injecting the round
+    number directly).
+
+    Returns {'is_concession': False, 'requested_issue_id': None} on any failure, or
+    if no message/key was given, so this never blocks the main call.
+    """
+    if not user_message or not openai_api_key:
+        return {'is_concession': False, 'requested_issue_id': None}
+
+    defaults = _default_issue_statuses()
+    valid_issue_ids = {item['id'] for item in defaults}
+
+    system_prompt = (
+        "You analyze one message from a job candidate in a negotiation. Determine whether "
+        "the candidate is offering a TRADE: willing to give ground / accept less on one "
+        "issue, specifically in order to ask for movement on a DIFFERENT issue. This must "
+        "be an explicit or clearly implied concession paired with a request, not just a "
+        "one-sided ask with no give. "
+        "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
+        "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
+        "Coverage, issue-7 Salary, issue-8 Location. "
+        "Return ONLY valid JSON in this exact shape: "
+        "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\"}. "
+        "requested_issue_id is the issue the candidate is asking the RECRUITER to move on "
+        "or improve - use null if is_concession is false or the requested issue is unclear."
+    )
+
+    payload = {
+        'model': 'gpt-4o-mini',  # fast/cheap model for a single lightweight classification
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': str(user_message)}
+        ],
+        'temperature': 0.0,  # deterministic classification
+        'max_tokens': 100,
+        'response_format': {'type': 'json_object'}
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {openai_api_key}'
+    }
+
+    try:
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"[INFO] First-concession detection returned {resp.status_code}, skipping")
+            return {'is_concession': False, 'requested_issue_id': None}
+
+        raw = resp.json()['choices'][0]['message']['content']
+        parsed = json.loads(raw)
+        is_concession = bool(parsed.get('is_concession'))
+        requested_issue_id = parsed.get('requested_issue_id')
+        if requested_issue_id not in valid_issue_ids:
+            requested_issue_id = None
+        return {'is_concession': is_concession, 'requested_issue_id': requested_issue_id}
+
+    except Exception as e:
+        print(f"[INFO] First-concession detection exception: {e}")
+        return {'is_concession': False, 'requested_issue_id': None}
+
+
+# --- Hold-firm enforcement (rounds 1-N, both conditions) ---
+# Shared by Prosocial and Proself - both prompts hold the same opening anchor and the
+# same "don't move Salary/Vacation Time in the first HOLD_FIRM_ROUNDS rounds" rule (see
+# [Starting point] / [CONCESSION PACING] in prompts.yaml). Keep these in sync with that
+# file if the case's opening offer or hold-firm window ever changes.
+HOLD_FIRM_ROUNDS = 3
+HOLD_FIRM_ANCHOR = {'issue-7': '$84,000', 'issue-3': '10 days'}  # Salary, Vacation Time
+
+
+def _matches_anchor(extracted_value, anchor_value):
+    """
+    Loose comparison for the hold-firm check: '$84,000' should match '84000'/'84,000'
+    despite formatting differences from the LLM extraction, so this doesn't flag a false
+    violation over punctuation alone. Falls back to a case-insensitive exact string match
+    if either side has no parseable number.
+    """
+    def extract_number(s):
+        m = re.search(r'[\d,]+', str(s) or '')
+        return m.group(0).replace(',', '') if m else None
+    extracted_num = extract_number(extracted_value)
+    anchor_num = extract_number(anchor_value)
+    if extracted_num is not None and anchor_num is not None:
+        return extracted_num == anchor_num
+    return str(extracted_value).strip().lower() == str(anchor_value).strip().lower()
+
+
+def _call_openai_completion(messages, model, temperature, seed, openai_api_key, timeout=30):
+    """
+    Minimal OpenAI chat completion call used only for the hold-firm regeneration retry
+    (see /lucid Step 5). Returns the generated text, or None on any failure - deliberately
+    lightweight, since a failed retry just means the caller keeps the original reply
+    rather than needing full error-handling parity with the main call in Step 4.
+    """
+    try:
+        payload = {'model': model, 'messages': messages, 'temperature': temperature}
+        if seed is not None:
+            payload['seed'] = seed
+        resp = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {openai_api_key}'},
+            json=payload, timeout=timeout
+        )
+        if resp.status_code != 200:
+            print(f"[WARN] Hold-firm regeneration call returned {resp.status_code}")
+            return None
+        return resp.json()['choices'][0]['message']['content']
+    except Exception as e:
+        print(f"[WARN] Hold-firm regeneration call exception: {e}")
+        return None
+
+
 def _normalize_prior_issue_statuses(raw):
     """
     Coerce whatever issue-status snapshot the frontend sent back (echoed from a
@@ -604,6 +726,48 @@ def lucid():
                         turn_number = sum(1 for m in messages if m.get('role') == 'assistant') + 1
                     print(f"[INFO /lucid] Current round: {turn_number}") # Vercel Log
 
+                    # Find the candidate's latest message. Needed below for the Prosocial
+                    # first-concession check, and reused again later for issue-status extraction.
+                    latest_user_message = ''
+                    for msg in reversed(messages):
+                        if msg.get('role') == 'user':
+                            latest_user_message = str(msg.get('content', ''))
+                            break
+
+                    # --- Prosocial-only: one-time "first concession" exception ---
+                    # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate offers
+                    # a trade for a non-prioritized issue, Prosocial should grant it for free as a
+                    # one-time trust-building gesture. Whether this has already happened is tracked
+                    # via a flag the frontend echoes back each round (prosocial_first_concession_used)
+                    # rather than asked of the model, for the same reason turn_number is computed
+                    # here instead of self-counted: "has this ever happened before in this
+                    # conversation" is exactly the kind of long-range state an LLM can't reliably
+                    # track on its own. Only spends the one-time exception if the requested issue is
+                    # NOT Salary/Vacation (issue-7/issue-3) - a first "concession" that happens to ask
+                    # for one of those doesn't consume it; the gesture is meant for low/intermediate
+                    # priority issues only.
+                    prosocial_first_concession_used = bool(body.get('prosocial_first_concession_used'))
+                    first_concession_note = None
+                    if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
+                        concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key)
+                        requested_issue_id = concession_check.get('requested_issue_id')
+                        if concession_check.get('is_concession') and requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                            requested_issue_label = next(
+                                (item['label'] for item in _default_issue_statuses() if item['id'] == requested_issue_id),
+                                requested_issue_id
+                            )
+                            first_concession_note = (
+                                f"[System note: this is the candidate's first concession this negotiation. "
+                                f"Per your one-time first-concession exception, grant their request on "
+                                f"{requested_issue_label} generously and unconditionally in this reply. "
+                                f"Do NOT accept whatever concession they offered in return, even though "
+                                f"they offered it - explicitly tell them it isn't needed, and leave every "
+                                f"other issue exactly at its current value this round. This is a pure, "
+                                f"no-strings-attached gift on {requested_issue_label} only.]"
+                            )
+                            prosocial_first_concession_used = True
+                            print(f"[INFO /lucid] Prosocial first-concession exception triggered on {requested_issue_label}") # Vercel Log
+
                     # --- Step 4: Call OpenAI API ---
                     openai_url = 'https://api.openai.com/v1/chat/completions'
                     headers = {
@@ -614,13 +778,40 @@ def lucid():
                     # own context (unreliable, especially with reinforcement-prompt system messages
                     # interspersed) - the system prompt's concession-pacing schedule ("hold rounds
                     # 1-3, move by round 6, ...") is only usable if the model has ground truth on
-                    # where it is. Appended fresh each call, right after the latest user message for
-                    # maximum salience - NOT persisted back to the frontend's conversation history,
-                    # so it never pollutes the stored transcript or duplicates across turns.
-                    messages_for_api = messages + [{
-                        'role': 'system',
-                        'content': f"[System note: this is round {turn_number} of the negotiation. Pace your concessions accordingly, per your instructions.]"
-                    }]
+                    # where it is. During the hold-firm window itself, spell the rule out explicitly
+                    # here rather than trust it to be recalled correctly from the initial system
+                    # prompt alone - same reasoning as injecting the round number in the first place.
+                    # Appended fresh each call, right after the latest user message for maximum
+                    # salience - NOT persisted back to the frontend's conversation history, so it
+                    # never pollutes the stored transcript or duplicates across turns.
+                    if turn_number <= HOLD_FIRM_ROUNDS:
+                        round_note = (
+                            f"[System note: this is round {turn_number} of the negotiation, still within "
+                            f"your hold-firm window (rounds 1-{HOLD_FIRM_ROUNDS}). You must NOT move Salary "
+                            f"or Vacation Time away from your opening anchor ({HOLD_FIRM_ANCHOR['issue-7']} / "
+                            f"{HOLD_FIRM_ANCHOR['issue-3']}) this round, no matter what the candidate offers "
+                            f"or asks for - hold firm on those two issues specifically. You may discuss, "
+                            f"concede on, or trade any of your other issues freely.]"
+                        )
+                    else:
+                        round_note = f"[System note: this is round {turn_number} of the negotiation. Pace your concessions accordingly, per your instructions.]"
+                    # Prosocial-only: [ROUND 1 — INFORMATION EXCHANGE] in the system prompt is
+                    # static (sent every call, unlike this note), so nothing in the prompt content
+                    # itself tells the model that step is already done once round 1 has passed - it
+                    # can just keep re-doing it every round. Make that explicit here instead of
+                    # relying on the model to infer it from the round number.
+                    if condition_key == 'prosocial' and turn_number > 1:
+                        round_note += (
+                            " You already completed your round-1 priority-gathering step in an "
+                            "earlier message - do not ask the candidate to restate their priorities "
+                            "again this round. Move the negotiation forward on the actual package "
+                            "instead, unless they bring up something new."
+                        )
+                    messages_for_api = messages + [{'role': 'system', 'content': round_note}]
+                    if first_concession_note:
+                        # Same ephemeral treatment as the round-number note above - fresh each call,
+                        # never persisted back into the stored conversation history.
+                        messages_for_api.append({'role': 'system', 'content': first_concession_note})
                     # Construct payload for OpenAI
                     data_payload = {
                         'model': model,
@@ -649,10 +840,54 @@ def lucid():
                             # Extract the generated text content safely
                             generated_text = resp_json['choices'][0]['message']['content']
 
+                            # --- Hold-firm safety net (rounds 1-HOLD_FIRM_ROUNDS, both conditions) ---
+                            # The round_note above asks nicely; this is the enforcement layer. Extract
+                            # what the reply actually says about Salary/Vacation Time and, if it moved
+                            # either away from the anchor during the hold-firm window, regenerate once
+                            # with an explicit correction rather than let a premature concession reach
+                            # the participant. assistant_updates is reused below for issue tracking
+                            # either way, so this isn't wasted extraction work.
+                            assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                            if turn_number <= HOLD_FIRM_ROUNDS:
+                                violated = [
+                                    issue_id for issue_id, anchor in HOLD_FIRM_ANCHOR.items()
+                                    if issue_id in assistant_updates and not _matches_anchor(assistant_updates[issue_id], anchor)
+                                ]
+                                if violated:
+                                    violated_labels = ['Salary' if i == 'issue-7' else 'Vacation Time' for i in violated]
+                                    print(f"[WARN /lucid] Hold-firm violation on {violated_labels} in round {turn_number}, regenerating") # Vercel Log
+                                    correction_note = (
+                                        f"[System note: your previous draft reply moved on "
+                                        f"{' and '.join(violated_labels)}, which violates your hold-firm window "
+                                        f"(rounds 1-{HOLD_FIRM_ROUNDS}). Write your reply again: keep Salary at "
+                                        f"{HOLD_FIRM_ANCHOR['issue-7']} and Vacation Time at {HOLD_FIRM_ANCHOR['issue-3']} "
+                                        f"unchanged this round. You may still respond to the candidate and move any "
+                                        f"other issue.]"
+                                    )
+                                    retry_text = _call_openai_completion(
+                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        model, used_temperature, used_seed, openai_api_key
+                                    )
+                                    if retry_text:
+                                        generated_text = retry_text
+                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                        still_violated = [
+                                            issue_id for issue_id, anchor in HOLD_FIRM_ANCHOR.items()
+                                            if issue_id in assistant_updates and not _matches_anchor(assistant_updates[issue_id], anchor)
+                                        ]
+                                        if still_violated:
+                                            print(f"[WARN /lucid] Hold-firm still violated on {still_violated} after regeneration - keeping it, not retrying again") # Vercel Log
+                                    else:
+                                        print("[WARN /lucid] Hold-firm regeneration call failed - keeping original (violating) reply") # Vercel Log
+
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
                                 'generated_text': generated_text,
-                                'used_temperature': used_temperature # Echo back parameters used
+                                'used_temperature': used_temperature, # Echo back parameters used
+                                # Echoed back every round regardless of condition (stays False for
+                                # Proself, which never touches this flag) so the frontend can persist
+                                # it and send it back next round - see the first-concession block above.
+                                'prosocial_first_concession_used': prosocial_first_concession_used
                             }
                             # --- Multi-issue offer tracking (per-round, both speakers) ---
                             # The frontend echoes back the last snapshot it persisted (body['issue_statuses'])
@@ -663,17 +898,12 @@ def lucid():
                             try:
                                 prior_issue_statuses = _normalize_prior_issue_statuses(body.get('issue_statuses'))
 
-                                latest_user_message = ''
-                                for msg in reversed(messages):
-                                    if msg.get('role') == 'user':
-                                        latest_user_message = str(msg.get('content', ''))
-                                        break
-
                                 user_updates = (
                                     _extract_issue_updates_from_message_llm(latest_user_message, openai_api_key)
                                     if latest_user_message else {}
                                 )
-                                assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                # assistant_updates was already computed above (post hold-firm check),
+                                # against the FINAL generated_text (post-regeneration if that happened).
 
                                 # The displayed/tracked "current offer" snapshot reflects only what the AI
                                 # actually said or agreed to - NOT the participant's unilateral ask. A user
