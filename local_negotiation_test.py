@@ -82,6 +82,13 @@ def main():
 
     turn_number = 0
     first_concession_used = False
+    # Accumulated Salary/Vacation Time state, same shape lucid.py tracks via issue_statuses -
+    # needed for the pacing-target check below (has the recruiter actually reached its
+    # required concession level by the schedule's deadline, or is it still sitting anchored).
+    current_statuses = [
+        {'id': 'issue-3', 'label': 'Vacation Time', 'status': lucid.HOLD_FIRM_ANCHOR['issue-3']},
+        {'id': 'issue-7', 'label': 'Salary', 'status': lucid.HOLD_FIRM_ANCHOR['issue-7']},
+    ]
 
     print(f"\n--- Testing '{condition_key}' (model={model}, temperature={temperature}) ---")
     print("Type a candidate message and press Enter. Type 'quit' to stop.\n")
@@ -121,29 +128,66 @@ def main():
                 "again this round. Move the negotiation forward on the actual package "
                 "instead, unless they bring up something new."
             )
+        # Same pacing-deadline prescription as lucid.py's /lucid endpoint: if this round has a
+        # mandatory concession target, name explicitly whatever hasn't been reached yet in the
+        # accumulated package (not just what's mentioned this round).
+        pacing_target = lucid._pacing_target(condition_key, turn_number)
+        if any(pacing_target.values()):
+            current_by_id = {item['id']: item['status'] for item in current_statuses}
+            still_needed = []
+            for issue_id, target in pacing_target.items():
+                if not target:
+                    continue
+                current = current_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id]
+                if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
+                    label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                    still_needed.append(f"{label} to {target}")
+            if still_needed:
+                round_note += (
+                    f" Per your concession schedule, by this round you are REQUIRED to have "
+                    f"moved {' and '.join(still_needed)} (you have not reached this yet) - do "
+                    f"so in this reply, even if the candidate hasn't specifically asked for it."
+                )
         messages_for_api = messages + [{'role': 'system', 'content': round_note}]
 
-        # --- Same Prosocial-only first-concession exception as lucid.py's /lucid endpoint ---
+        # --- Same Prosocial-only first-concession exception as lucid.py's /lucid endpoint.
+        # Trigger (any concession) and grant (never Salary/Vacation) are decoupled: the
+        # exception consumes on ANY detected concession, but if the candidate specifically
+        # asked for Salary/Vacation, the model is told to grant a different issue instead. ---
         if condition_key == 'prosocial' and not first_concession_used:
             check = lucid._detect_first_concession_llm(user_message, api_key)
-            requested_issue_id = check.get('requested_issue_id')
-            if check.get('is_concession') and requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
-                requested_issue_label = next(
-                    (item['label'] for item in lucid._default_issue_statuses() if item['id'] == requested_issue_id),
-                    requested_issue_id
-                )
-                note = (
-                    f"[System note: this is the candidate's first concession this negotiation. "
-                    f"Per your one-time first-concession exception, grant their request on "
-                    f"{requested_issue_label} generously and unconditionally in this reply. "
-                    f"Do NOT accept whatever concession they offered in return, even though "
-                    f"they offered it - explicitly tell them it isn't needed, and leave every "
-                    f"other issue exactly at its current value this round. This is a pure, "
-                    f"no-strings-attached gift on {requested_issue_label} only.]"
-                )
+            if check.get('is_concession'):
+                requested_issue_id = check.get('requested_issue_id')
+                first_concession_used = True  # consumed either way
+                if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                    requested_issue_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == requested_issue_id),
+                        requested_issue_id
+                    )
+                    note = (
+                        f"[System note: this is the candidate's first concession this negotiation. "
+                        f"Per your one-time first-concession exception, grant their request on "
+                        f"{requested_issue_label} generously and unconditionally in this reply. "
+                        f"Do NOT accept whatever concession they offered in return, even though "
+                        f"they offered it - explicitly tell them it isn't needed, and leave every "
+                        f"other issue exactly at its current value this round. This is a pure, "
+                        f"no-strings-attached gift on {requested_issue_label} only.]"
+                    )
+                    print(f"  [first-concession exception triggered on {requested_issue_label}]")
+                else:
+                    note = (
+                        f"[System note: this is the candidate's first concession this negotiation, "
+                        f"but you cannot move on Salary or Vacation Time right now (still in your "
+                        f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
+                        f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
+                        f"Date, Moving Expense Coverage, or Location) and grant the candidate's "
+                        f"preferred value on it generously and unconditionally in this reply, even "
+                        f"if they haven't specifically asked for it - explain you can't move on "
+                        f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
+                        f"Vacation Time.]"
+                    )
+                    print("  [first-concession exception triggered (requested issue unavailable - granting an alternate issue instead)]")
                 messages_for_api.append({'role': 'system', 'content': note})
-                first_concession_used = True
-                print(f"  [first-concession exception triggered on {requested_issue_label}]")
 
         try:
             reply = call_openai(messages_for_api, api_key, model, temperature)
@@ -151,10 +195,10 @@ def main():
             print(f"  [error calling OpenAI: {e}]")
             continue
 
-        # --- Same hold-firm safety net as lucid.py's /lucid endpoint: regenerate once if the
-        # reply moved Salary/Vacation Time during the hold-firm window ---
+        # --- Same enforcement layers as lucid.py's /lucid endpoint: regenerate once if the
+        # reply either conceded too early (hold-firm window) or not enough (pacing deadline) ---
+        assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
         if turn_number <= lucid.HOLD_FIRM_ROUNDS:
-            assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
             violated = [
                 issue_id for issue_id, anchor in lucid.HOLD_FIRM_ANCHOR.items()
                 if issue_id in assistant_updates and not lucid._matches_anchor(assistant_updates[issue_id], anchor)
@@ -175,9 +219,41 @@ def main():
                 )
                 if retry_text:
                     reply = retry_text
+                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
                 else:
                     print("  [regeneration call failed - keeping original (violating) reply]")
+        elif any(pacing_target.values()):
+            accumulated = lucid.apply_issue_updates(current_statuses, assistant_updates)
+            accumulated_by_id = {item['id']: item['status'] for item in accumulated}
+            under_conceded = [
+                issue_id for issue_id, target in pacing_target.items()
+                if target and lucid._compare_recruiter_value(
+                    issue_id, accumulated_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id], target
+                ) == 'better'
+            ]
+            if under_conceded:
+                targets_desc = ', '.join(
+                    f"{'Salary' if i == 'issue-7' else 'Vacation Time'} to {pacing_target[i]}"
+                    for i in under_conceded
+                )
+                print(f"  [pacing violation - required concession(s) not yet reached in round {turn_number} ({targets_desc}), regenerating]")
+                correction_note = (
+                    f"[System note: your previous draft reply did not move {targets_desc}, which your "
+                    f"concession schedule requires by this round. Write your reply again: move "
+                    f"{targets_desc} in this reply, even if the candidate hasn't specifically asked for "
+                    f"it. You may still respond to the candidate and address any other issue.]"
+                )
+                retry_text = lucid._call_openai_completion(
+                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    model, temperature, None, api_key
+                )
+                if retry_text:
+                    reply = retry_text
+                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                else:
+                    print("  [regeneration call failed - keeping original (under-conceded) reply]")
 
+        current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
         print(f"\nAlex (round {turn_number}): {reply}\n")
 

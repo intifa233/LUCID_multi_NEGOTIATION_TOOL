@@ -282,6 +282,137 @@ def _matches_anchor(extracted_value, anchor_value):
     return str(extracted_value).strip().lower() == str(anchor_value).strip().lower()
 
 
+# --- Recruiter payoff table (all 8 issues) ---
+# Digitized from the same [PAYOFF SCHEDULE — RECRUITER] table in prompts.yaml (identical in
+# both conditions). This is what lets CODE tell whether a given value is actually favorable
+# or unfavorable to the recruiter, instead of trusting the model's own framing or just
+# detecting "did the value change." Example of why that distinction matters: a candidate
+# offering to start EARLIER sounds like a concession, but on this table later start dates
+# score higher for the recruiter (Jun1=0 ... Aug1=2400) - "earlier" is actually a worse
+# position for the recruiter, not a gift. Keep in sync with prompts.yaml if the case's
+# payoff schedule ever changes.
+RECRUITER_PAYOFF_TABLE = {
+    'issue-1': {'kind': 'number', 'options': [('10%', 0), ('8%', 400), ('6%', 800), ('4%', 1200), ('2%', 1600)]},              # Bonus
+    'issue-2': {'kind': 'letter', 'options': [('Division A', 0), ('Division B', -600), ('Division C', -1200), ('Division D', -1800), ('Division E', -2400)]},  # Job Assignment
+    'issue-3': {'kind': 'number', 'options': [('25 days', 0), ('20 days', 1000), ('15 days', 2000), ('10 days', 3000), ('5 days', 4000)]},  # Vacation Time
+    'issue-4': {'kind': 'date', 'options': [('June 1', 0), ('June 15', 600), ('July 1', 1200), ('July 15', 1800), ('August 1', 2400)]},     # Starting Date
+    'issue-5': {'kind': 'number', 'options': [('100%', 0), ('90%', 200), ('80%', 400), ('70%', 600), ('60%', 800)]},           # Moving Expense Coverage
+    'issue-6': {'kind': 'letter', 'options': [('Plan A', 0), ('Plan B', 800), ('Plan C', 1600), ('Plan D', 2400), ('Plan E', 3200)]},        # Insurance Coverage
+    'issue-7': {'kind': 'number', 'options': [('$90,000', -6000), ('$88,000', -4500), ('$86,000', -3000), ('$84,000', -1500), ('$82,000', 0)]},  # Salary
+    'issue-8': {'kind': 'city', 'options': [('New York', 0), ('Boston', 300), ('Chicago', 600), ('Atlanta', 900), ('San Francisco', 1200)]},  # Location
+}
+
+_CITY_ALIASES = {'new york': 'New York', 'ny': 'New York', 'nyc': 'New York', 'boston': 'Boston',
+                  'chicago': 'Chicago', 'atlanta': 'Atlanta', 'san francisco': 'San Francisco', 'sf': 'San Francisco'}
+_DATE_ALIASES = {'june 1': 'June 1', 'jun 1': 'June 1', 'june 15': 'June 15', 'jun 15': 'June 15',
+                  'july 1': 'July 1', 'jul 1': 'July 1', 'july 15': 'July 15', 'jul 15': 'July 15',
+                  'august 1': 'August 1', 'aug 1': 'August 1'}
+
+
+def _lookup_recruiter_points(issue_id, raw_value):
+    """
+    Matches a free-text extracted value (e.g. "15 days", "Division B", "$86,000", "SF") to
+    the closest option on RECRUITER_PAYOFF_TABLE for that issue and returns its point value,
+    or None if it can't be matched at all (empty/unparseable/off-grid). Numeric issues
+    (Bonus/Vacation/Moving Coverage/Salary) match by nearest number; Job Assignment/Insurance
+    match by the A-E letter; Location/Starting Date match by keyword (handles common
+    abbreviations like "SF"/"NY").
+    """
+    table = RECRUITER_PAYOFF_TABLE.get(issue_id)
+    if not table or not raw_value:
+        return None
+    text = str(raw_value).strip()
+    options = table['options']
+
+    if table['kind'] == 'number':
+        m = re.search(r'[\d,]+', text)
+        if not m:
+            return None
+        num = int(m.group(0).replace(',', ''))
+        best_pts, best_diff = None, None
+        for label, pts in options:
+            onum = int(re.search(r'[\d,]+', label).group(0).replace(',', ''))
+            diff = abs(onum - num)
+            if best_diff is None or diff < best_diff:
+                best_pts, best_diff = pts, diff
+        return best_pts
+
+    if table['kind'] == 'letter':
+        m = re.search(r'\b([A-E])\b', text.upper())
+        if not m:
+            return None
+        letter = m.group(1)
+        for label, pts in options:
+            if label.strip().upper().endswith(letter):
+                return pts
+        return None
+
+    if table['kind'] == 'date':
+        low = text.lower()
+        # Longest alias first: "july 1" is a substring of "july 15", so checking short
+        # aliases first would misidentify "July 15" as "July 1".
+        for alias, canonical in sorted(_DATE_ALIASES.items(), key=lambda kv: -len(kv[0])):
+            if alias in low:
+                for label, pts in options:
+                    if label == canonical:
+                        return pts
+        return None
+
+    if table['kind'] == 'city':
+        low = text.lower()
+        for alias, canonical in sorted(_CITY_ALIASES.items(), key=lambda kv: -len(kv[0])):
+            if alias in low:
+                for label, pts in options:
+                    if label == canonical:
+                        return pts
+        return None
+
+    return None
+
+
+def _compare_recruiter_value(issue_id, new_value, prior_value):
+    """
+    Returns 'better' / 'worse' / 'same' / 'unknown' - whether new_value scores higher (more
+    favorable to the recruiter), lower, the same, or couldn't be compared at all, versus
+    prior_value, using RECRUITER_PAYOFF_TABLE. This is the ground-truth check for "is this
+    actually a concession" that pure string/anchor matching can't provide.
+    """
+    new_pts = _lookup_recruiter_points(issue_id, new_value)
+    prior_pts = _lookup_recruiter_points(issue_id, prior_value)
+    if new_pts is None or prior_pts is None:
+        return 'unknown'
+    if new_pts > prior_pts:
+        return 'better'
+    if new_pts < prior_pts:
+        return 'worse'
+    return 'same'
+
+
+# --- Round-based concession pacing targets (both conditions) ---
+# Turns prompts.yaml's [CONCESSION PACING] prose into an explicit, checkable requirement:
+# by the round the schedule names as a deadline, Salary/Vacation Time must have moved at
+# least this far - not just "described as expected" in a system prompt the model has to
+# remember to apply many turns later. Built after testing showed relying on the prose alone
+# was unreliable in BOTH directions across models: conceding too early (caught by the
+# hold-firm check above), and never conceding at all even past the deadline (which nothing
+# previously caught). Keep in sync with prompts.yaml if the schedule ever changes.
+PROSELF_CONCESSION_ROUND = 9  # proself's schedule: "only in rounds 9-10" (or genuine walkaway risk, not modeled here)
+PACING_STEP = {'issue-7': '$86,000', 'issue-3': '15 days'}  # the mandated step for both conditions' first move
+
+
+def _pacing_target(condition_key, turn_number):
+    """
+    Returns {'issue-7': target_or_None, 'issue-3': target_or_None} - the minimum concession
+    level (canonical grid value) the recruiter is required to have reached by this round.
+    None means the opening anchor is still an acceptable position, no mandatory move yet.
+    """
+    if condition_key == 'prosocial' and turn_number >= 6:  # schedule: "$86,000 by round 6" / "15 days by round 6"
+        return dict(PACING_STEP)
+    if condition_key == 'proself' and turn_number >= PROSELF_CONCESSION_ROUND:
+        return dict(PACING_STEP)
+    return {'issue-7': None, 'issue-3': None}
+
+
 def _call_openai_completion(messages, model, temperature, seed, openai_api_key, timeout=30):
     """
     Minimal OpenAI chat completion call used only for the hold-firm regeneration retry
@@ -734,39 +865,67 @@ def lucid():
                             latest_user_message = str(msg.get('content', ''))
                             break
 
+                    # The accumulated package as of last round (frontend echoes this back, same
+                    # as issue_statuses elsewhere). Computed here (rather than only later, where
+                    # the older code path did) so the pacing-target check in Step 5 can compare
+                    # against it too - reused again in the issue-tracking block below.
+                    prior_issue_statuses = _normalize_prior_issue_statuses(body.get('issue_statuses'))
+
+                    # This round's required minimum concession level, if any - see
+                    # _pacing_target(). Computed once, used both for the round note (Step 4)
+                    # and the post-hoc enforcement check (Step 5).
+                    pacing_target = _pacing_target(condition_key, turn_number)
+
                     # --- Prosocial-only: one-time "first concession" exception ---
                     # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate offers
-                    # a trade for a non-prioritized issue, Prosocial should grant it for free as a
-                    # one-time trust-building gesture. Whether this has already happened is tracked
-                    # via a flag the frontend echoes back each round (prosocial_first_concession_used)
+                    # ANY concession - on any issue, regardless of what they're asking for in
+                    # return - Prosocial should reward it with a one-time trust-building gesture.
+                    # The TRIGGER (has a concession happened yet) and the GRANT (what gets given
+                    # for free) are deliberately decoupled: the trigger fires and consumes the
+                    # exception on any detected concession, but the grant itself is never Salary or
+                    # Vacation Time (issue-7/issue-3) - if that's what the candidate specifically
+                    # asked for, the model picks a different issue to give instead, rather than the
+                    # exception just not firing. Whether this has already happened is tracked via a
+                    # flag the frontend echoes back each round (prosocial_first_concession_used)
                     # rather than asked of the model, for the same reason turn_number is computed
                     # here instead of self-counted: "has this ever happened before in this
                     # conversation" is exactly the kind of long-range state an LLM can't reliably
-                    # track on its own. Only spends the one-time exception if the requested issue is
-                    # NOT Salary/Vacation (issue-7/issue-3) - a first "concession" that happens to ask
-                    # for one of those doesn't consume it; the gesture is meant for low/intermediate
-                    # priority issues only.
+                    # track on its own.
                     prosocial_first_concession_used = bool(body.get('prosocial_first_concession_used'))
                     first_concession_note = None
                     if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
                         concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key)
-                        requested_issue_id = concession_check.get('requested_issue_id')
-                        if concession_check.get('is_concession') and requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
-                            requested_issue_label = next(
-                                (item['label'] for item in _default_issue_statuses() if item['id'] == requested_issue_id),
-                                requested_issue_id
-                            )
-                            first_concession_note = (
-                                f"[System note: this is the candidate's first concession this negotiation. "
-                                f"Per your one-time first-concession exception, grant their request on "
-                                f"{requested_issue_label} generously and unconditionally in this reply. "
-                                f"Do NOT accept whatever concession they offered in return, even though "
-                                f"they offered it - explicitly tell them it isn't needed, and leave every "
-                                f"other issue exactly at its current value this round. This is a pure, "
-                                f"no-strings-attached gift on {requested_issue_label} only.]"
-                            )
-                            prosocial_first_concession_used = True
-                            print(f"[INFO /lucid] Prosocial first-concession exception triggered on {requested_issue_label}") # Vercel Log
+                        if concession_check.get('is_concession'):
+                            requested_issue_id = concession_check.get('requested_issue_id')
+                            prosocial_first_concession_used = True  # consumed either way - see comment above
+                            if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                                requested_issue_label = next(
+                                    (item['label'] for item in _default_issue_statuses() if item['id'] == requested_issue_id),
+                                    requested_issue_id
+                                )
+                                first_concession_note = (
+                                    f"[System note: this is the candidate's first concession this negotiation. "
+                                    f"Per your one-time first-concession exception, grant their request on "
+                                    f"{requested_issue_label} generously and unconditionally in this reply. "
+                                    f"Do NOT accept whatever concession they offered in return, even though "
+                                    f"they offered it - explicitly tell them it isn't needed, and leave every "
+                                    f"other issue exactly at its current value this round. This is a pure, "
+                                    f"no-strings-attached gift on {requested_issue_label} only.]"
+                                )
+                                print(f"[INFO /lucid] Prosocial first-concession exception triggered on {requested_issue_label}") # Vercel Log
+                            else:
+                                first_concession_note = (
+                                    f"[System note: this is the candidate's first concession this negotiation, "
+                                    f"but you cannot move on Salary or Vacation Time right now (still in your "
+                                    f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
+                                    f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
+                                    f"Date, Moving Expense Coverage, or Location) and grant the candidate's "
+                                    f"preferred value on it generously and unconditionally in this reply, even "
+                                    f"if they haven't specifically asked for it - explain you can't move on "
+                                    f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
+                                    f"Vacation Time.]"
+                                )
+                                print("[INFO /lucid] Prosocial first-concession exception triggered (requested issue unavailable - granting an alternate issue instead)") # Vercel Log
 
                     # --- Step 4: Call OpenAI API ---
                     openai_url = 'https://api.openai.com/v1/chat/completions'
@@ -807,6 +966,28 @@ def lucid():
                             "again this round. Move the negotiation forward on the actual package "
                             "instead, unless they bring up something new."
                         )
+                    # If this round has a mandatory concession deadline (see _pacing_target), check
+                    # the ACCUMULATED package so far (not just what's mentioned this round) and name
+                    # explicitly whatever hasn't been reached yet - turns the schedule into a
+                    # concrete requirement instead of prose the model has to remember to apply many
+                    # turns after reading it.
+                    if any(pacing_target.values()):
+                        prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                        still_needed = []
+                        for issue_id, target in pacing_target.items():
+                            if not target:
+                                continue
+                            current = prior_by_id.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
+                            if _compare_recruiter_value(issue_id, current, target) == 'better':
+                                label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                                still_needed.append(f"{label} to {target}")
+                        if still_needed:
+                            round_note += (
+                                f" Per your concession schedule, by this round you are REQUIRED to "
+                                f"have moved {' and '.join(still_needed)} (you have not reached this "
+                                f"yet) - do so in this reply, even if the candidate hasn't "
+                                f"specifically asked for it."
+                            )
                     messages_for_api = messages + [{'role': 'system', 'content': round_note}]
                     if first_concession_note:
                         # Same ephemeral treatment as the round-number note above - fresh each call,
@@ -880,6 +1061,56 @@ def lucid():
                                     else:
                                         print("[WARN /lucid] Hold-firm regeneration call failed - keeping original (violating) reply") # Vercel Log
 
+                            # --- Pacing-deadline safety net (rounds with a mandatory concession
+                            # target - see _pacing_target) ---
+                            # The opposite failure mode from the hold-firm check above: instead of
+                            # conceding too early, the model just never gets around to conceding at
+                            # all, even past its own schedule's deadline. Compare the ACCUMULATED
+                            # package (prior rounds + this reply) against the required minimum using
+                            # the real payoff table (RECRUITER_PAYOFF_TABLE), not string matching -
+                            # "did the value change" isn't the same question as "is this actually a
+                            # concession" (e.g. an earlier start date sounds like a candidate
+                            # concession but scores WORSE for the recruiter on the real table).
+                            elif any(pacing_target.values()):
+                                accumulated = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                accumulated_by_id = {item['id']: item.get('status', '') for item in accumulated}
+                                under_conceded = [
+                                    issue_id for issue_id, target in pacing_target.items()
+                                    if target and _compare_recruiter_value(
+                                        issue_id, accumulated_by_id.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id], target
+                                    ) == 'better'
+                                ]
+                                if under_conceded:
+                                    targets_desc = ', '.join(
+                                        f"{'Salary' if i == 'issue-7' else 'Vacation Time'} to {pacing_target[i]}"
+                                        for i in under_conceded
+                                    )
+                                    print(f"[WARN /lucid] Pacing violation - required concession(s) not yet reached in round {turn_number} ({targets_desc}), regenerating") # Vercel Log
+                                    correction_note = (
+                                        f"[System note: your previous draft reply did not move {targets_desc}, "
+                                        f"which your concession schedule requires by this round. Write your reply "
+                                        f"again: move {targets_desc} in this reply, even if the candidate hasn't "
+                                        f"specifically asked for it. You may still respond to the candidate and "
+                                        f"address any other issue.]"
+                                    )
+                                    retry_text = _call_openai_completion(
+                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        model, used_temperature, used_seed, openai_api_key
+                                    )
+                                    if retry_text:
+                                        generated_text = retry_text
+                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                        recheck = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                        recheck_by_id = {item['id']: item.get('status', '') for item in recheck}
+                                        still_under = [
+                                            i for i in under_conceded
+                                            if _compare_recruiter_value(i, recheck_by_id.get(i) or HOLD_FIRM_ANCHOR[i], pacing_target[i]) == 'better'
+                                        ]
+                                        if still_under:
+                                            print(f"[WARN /lucid] Pacing still not met on {still_under} after regeneration - keeping it, not retrying again") # Vercel Log
+                                    else:
+                                        print("[WARN /lucid] Pacing regeneration call failed - keeping original (under-conceded) reply") # Vercel Log
+
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
                                 'generated_text': generated_text,
@@ -896,8 +1127,8 @@ def lucid():
                             # human's proposal and the AI's reply separately so trade-offs from either side are
                             # captured, then diff the merged result against the prior snapshot to see what moved.
                             try:
-                                prior_issue_statuses = _normalize_prior_issue_statuses(body.get('issue_statuses'))
-
+                                # prior_issue_statuses was already computed earlier (Step 4), so it's
+                                # available for both the pacing-target check above and here.
                                 user_updates = (
                                     _extract_issue_updates_from_message_llm(latest_user_message, openai_api_key)
                                     if latest_user_message else {}
