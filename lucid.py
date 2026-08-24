@@ -284,6 +284,88 @@ def _detect_first_concession_llm(user_message, openai_api_key):
         return dict(empty_result)
 
 
+def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
+    """
+    Analyzes the RECRUITER's own reply for a claimed reciprocity trigger: is it justifying a
+    grant by crediting the candidate with having given something up or offered flexibility on
+    a specific issue this round (e.g. "since you offered flexibility on starting earlier, I
+    can reciprocate by...")? This is the same directional bug the first-concession check
+    guards against (see _detect_first_concession_llm), but that check only ever runs once, at
+    the one-time first-concession moment - this runs every round, for both conditions, because
+    prompts.yaml's ordinary reciprocity rule (not the one-time exception) can invoke the same
+    "sounds like a concession but isn't" framing at any point in the negotiation (e.g. an
+    EARLIER start date reads like a concession but scores WORSE for the recruiter on the real
+    payoff table).
+
+    Returns {'claims_reciprocity': False, 'credited_issue_id': None, 'credited_value': None}
+    on any failure, or if no message/key given, so this never blocks the main call.
+    """
+    empty_result = {'claims_reciprocity': False, 'credited_issue_id': None, 'credited_value': None}
+    if not assistant_message or not openai_api_key:
+        return dict(empty_result)
+
+    defaults = _default_issue_statuses()
+    valid_issue_ids = {item['id'] for item in defaults}
+
+    system_prompt = (
+        "You analyze one message from a job RECRUITER in a negotiation. Determine whether the "
+        "recruiter is justifying a concession/grant by crediting the CANDIDATE with having "
+        "given something up or offered flexibility on a specific issue (e.g. 'since you "
+        "offered flexibility on starting earlier, I can...', 'to reciprocate your willingness "
+        "to...'). This must be an explicit or clearly implied claim that the CANDIDATE moved "
+        "or offered something specific on some issue - not just the recruiter unilaterally "
+        "granting something with no such claim. "
+        "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
+        "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
+        "Coverage, issue-7 Salary, issue-8 Location. "
+        "Return ONLY valid JSON in this exact shape: "
+        "{\"claims_reciprocity\": true, \"credited_issue_id\": \"issue-4\", "
+        "\"credited_value\": \"June 15\"}. "
+        "credited_issue_id/credited_value are the issue and the specific concrete value the "
+        "recruiter is crediting to the candidate (e.g. 'June 15', 'Division C', '80%') - not "
+        "a description. Use null for both if claims_reciprocity is false or unclear."
+    )
+
+    payload = {
+        'model': 'gpt-4o-mini',  # fast/cheap model for a single lightweight classification
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': str(assistant_message)}
+        ],
+        'temperature': 0.0,  # deterministic classification
+        'max_tokens': 150,
+        'response_format': {'type': 'json_object'}
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {openai_api_key}'
+    }
+
+    try:
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"[INFO] Reciprocity-claim detection returned {resp.status_code}, skipping")
+            return dict(empty_result)
+
+        raw = resp.json()['choices'][0]['message']['content']
+        parsed = json.loads(raw)
+        claims_reciprocity = bool(parsed.get('claims_reciprocity'))
+        credited_issue_id = parsed.get('credited_issue_id')
+        if credited_issue_id not in valid_issue_ids:
+            credited_issue_id = None
+        credited_value = parsed.get('credited_value')
+        credited_value = str(credited_value).strip() if credited_value else None
+        return {
+            'claims_reciprocity': claims_reciprocity,
+            'credited_issue_id': credited_issue_id,
+            'credited_value': credited_value
+        }
+
+    except Exception as e:
+        print(f"[INFO] Reciprocity-claim detection exception: {e}")
+        return dict(empty_result)
+
+
 # --- Hold-firm enforcement (rounds 1-N, both conditions) ---
 # Shared by Prosocial and Proself - both prompts hold the same opening anchor and the
 # same "don't move Salary/Vacation Time in the first HOLD_FIRM_ROUNDS rounds" rule (see
@@ -1364,6 +1446,61 @@ def lucid():
                                             print(f"[WARN /lucid] First-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again") # Vercel Log
                                     else:
                                         print("[WARN /lucid] First-concession regeneration call failed - keeping original reply") # Vercel Log
+
+                            # --- Reciprocity-claim safety net (every round, both conditions) ---
+                            # The checks above only cover the one-time first-concession moment
+                            # and the Salary/Vacation hold-firm/pacing windows. The same
+                            # directional bug (an earlier start date reads like a candidate
+                            # concession but scores WORSE for the recruiter on the real payoff
+                            # table) can also happen any time the model invokes prompts.yaml's
+                            # ordinary reciprocity rule organically - e.g. "Since you offered
+                            # flexibility on starting earlier, I can reciprocate by...". Whenever
+                            # the reply credits the candidate with a specific concession, verify
+                            # that claim against RECRUITER_PAYOFF_TABLE before letting the
+                            # reciprocal grant stand.
+                            reciprocity_check = _detect_reciprocity_claim_llm(generated_text, openai_api_key)
+                            if reciprocity_check.get('claims_reciprocity'):
+                                credited_issue_id = reciprocity_check.get('credited_issue_id')
+                                credited_value = reciprocity_check.get('credited_value')
+                                if credited_issue_id and credited_value:
+                                    credited_prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                    credited_prior_value = credited_prior_by_id.get(credited_issue_id) or RECRUITER_OPENING_OFFER.get(credited_issue_id)
+                                    if _compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value) == 'worse':
+                                        credited_label = next(
+                                            (item['label'] for item in _default_issue_statuses() if item['id'] == credited_issue_id),
+                                            credited_issue_id
+                                        )
+                                        print(f"[WARN /lucid] Reciprocity claim invalid - {credited_issue_id}->{credited_value} is NOT favorable to the recruiter, regenerating") # Vercel Log
+                                        correction_note = (
+                                            f"[System note: your previous draft reply credited the candidate with a "
+                                            f"concession on {credited_label} ({credited_value}) and reciprocated based "
+                                            f"on that - but per your payoff schedule, that value is NOT actually "
+                                            f"favorable to you compared to your current position on {credited_label}, "
+                                            f"so it isn't a real concession. Write your reply again: do not treat that "
+                                            f"as a concession or reciprocate based on it. You may still make a move "
+                                            f"this reply if it's justified some other way (your own concession "
+                                            f"schedule, or a genuine concession the candidate made elsewhere), but "
+                                            f"not this one.]"
+                                        )
+                                        retry_text = _call_openai_completion(
+                                            messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                            model, used_temperature, used_seed, openai_api_key
+                                        )
+                                        if retry_text:
+                                            generated_text = retry_text
+                                            assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                            recheck = _detect_reciprocity_claim_llm(generated_text, openai_api_key)
+                                            still_invalid = False
+                                            if recheck.get('claims_reciprocity'):
+                                                rc_issue = recheck.get('credited_issue_id')
+                                                rc_value = recheck.get('credited_value')
+                                                if rc_issue and rc_value:
+                                                    rc_prior = credited_prior_by_id.get(rc_issue) or RECRUITER_OPENING_OFFER.get(rc_issue)
+                                                    still_invalid = _compare_recruiter_value(rc_issue, rc_value, rc_prior) == 'worse'
+                                            if still_invalid:
+                                                print("[WARN /lucid] Reciprocity claim still invalid after regeneration - keeping it, not retrying again") # Vercel Log
+                                        else:
+                                            print("[WARN /lucid] Reciprocity-claim regeneration call failed - keeping original reply") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {

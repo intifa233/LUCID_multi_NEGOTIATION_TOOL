@@ -4,11 +4,11 @@ Standalone local test harness for the LUCID recruiter prompts (prompts.yaml).
 
 Lets you chat with the Prosocial or Proself recruiter AI directly from the terminal,
 without needing Flask, Vercel, or Qualtrics running. Reuses the exact same round-number
-injection and Prosocial first-concession detection as lucid.py's real /lucid endpoint
-(so pacing/exception behavior is faithful to production), but skips everything that's
-only for data collection - no issue-status extraction, no offer-trajectory logging, no
-Embedded Data. This is purely for eyeballing "does the prompt actually behave the way
-we designed it" - nothing here is saved anywhere.
+injection, Prosocial first-concession detection/one-level cap, and reciprocity-claim
+safety net as lucid.py's real /lucid endpoint (so pacing/exception behavior is faithful
+to production), but skips everything that's only for data collection - no offer-
+trajectory logging, no Embedded Data. This is purely for eyeballing "does the prompt
+actually behave the way we designed it" - nothing here is saved anywhere.
 
 Setup:
     1. Put your OpenAI API key in .env (already gitignored):
@@ -357,6 +357,52 @@ def main():
                         print(f"  [first-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again]")
                 else:
                     print("  [first-concession regeneration call failed - keeping original reply]")
+
+        # --- Same reciprocity-claim safety net as lucid.py's /lucid endpoint: every round,
+        # both conditions - verify any "since you offered X, I'll reciprocate" claim against
+        # the real payoff table before letting the reciprocal grant stand ---
+        reciprocity_check = lucid._detect_reciprocity_claim_llm(reply, api_key)
+        if reciprocity_check.get('claims_reciprocity'):
+            credited_issue_id = reciprocity_check.get('credited_issue_id')
+            credited_value = reciprocity_check.get('credited_value')
+            if credited_issue_id and credited_value:
+                credited_prior_by_id = {item['id']: item['status'] for item in current_statuses}
+                credited_prior_value = credited_prior_by_id.get(credited_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(credited_issue_id)
+                if lucid._compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value) == 'worse':
+                    credited_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == credited_issue_id),
+                        credited_issue_id
+                    )
+                    print(f"  [reciprocity claim invalid - {credited_issue_id}->{credited_value} is NOT favorable to the recruiter, regenerating]")
+                    correction_note = (
+                        f"[System note: your previous draft reply credited the candidate with a "
+                        f"concession on {credited_label} ({credited_value}) and reciprocated based on "
+                        f"that - but per your payoff schedule, that value is NOT actually favorable to "
+                        f"you compared to your current position on {credited_label}, so it isn't a real "
+                        f"concession. Write your reply again: do not treat that as a concession or "
+                        f"reciprocate based on it. You may still make a move this reply if it's "
+                        f"justified some other way (your own concession schedule, or a genuine "
+                        f"concession the candidate made elsewhere), but not this one.]"
+                    )
+                    retry_text = lucid._call_openai_completion(
+                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                        model, temperature, None, api_key
+                    )
+                    if retry_text:
+                        reply = retry_text
+                        assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                        recheck = lucid._detect_reciprocity_claim_llm(reply, api_key)
+                        still_invalid = False
+                        if recheck.get('claims_reciprocity'):
+                            rc_issue = recheck.get('credited_issue_id')
+                            rc_value = recheck.get('credited_value')
+                            if rc_issue and rc_value:
+                                rc_prior = credited_prior_by_id.get(rc_issue) or lucid.RECRUITER_OPENING_OFFER.get(rc_issue)
+                                still_invalid = lucid._compare_recruiter_value(rc_issue, rc_value, rc_prior) == 'worse'
+                        if still_invalid:
+                            print("  [reciprocity claim still invalid after regeneration - keeping it, not retrying again]")
+                    else:
+                        print("  [reciprocity-claim regeneration call failed - keeping original reply]")
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
