@@ -442,32 +442,74 @@ def _compare_recruiter_value(issue_id, new_value, prior_value):
     return 'same'
 
 
-def _first_concession_grant_satisfied(prior_statuses, assistant_updates, target_issue_id):
+def _one_level_step(issue_id, current_value):
     """
-    Checks whether a first-concession grant note (see /lucid Step 3) was actually honored:
-    did at least one eligible issue move to a value that's favorable to the CANDIDATE (i.e.
-    worse for the recruiter) versus its prior value? If target_issue_id is given, only that
-    issue counts (the model was told exactly which one to grant); otherwise any of the six
-    non-Salary/Vacation issues counts (the model had a free choice among them). Returns True
-    if satisfied, or if nothing could be verified either way (benefit of the doubt, since
-    letter/date/city matching can legitimately fail to resolve) - only a confirmed 'same' or
-    missing-entirely reading counts as non-compliant.
+    Returns the next grid option ONE level toward the CANDIDATE - i.e. the option with the
+    next-lower recruiter point value - from current_value, or None if current_value can't be
+    matched or is already at the grid's most candidate-favorable option. Caps the first-
+    concession exception's "unconditional" grant to a single step instead of jumping straight
+    to whatever the candidate specifically asked for (each issue only has 5 discrete grid
+    values, and RECRUITER_PAYOFF_TABLE's option lists aren't consistently ordered by
+    favorability - e.g. issue-2's list runs best-for-recruiter-first while issue-6's runs the
+    opposite way - so this sorts by points rather than trusting list order).
+    """
+    table = RECRUITER_PAYOFF_TABLE.get(issue_id)
+    if not table:
+        return None
+    current_pts = _lookup_recruiter_points(issue_id, current_value)
+    if current_pts is None:
+        return None
+    sorted_options = sorted(table['options'], key=lambda kv: kv[1])
+    pts_list = [pts for _, pts in sorted_options]
+    try:
+        idx = pts_list.index(current_pts)
+    except ValueError:
+        return None
+    if idx == 0:
+        return None  # already at the most candidate-favorable option on this issue's grid
+    return sorted_options[idx - 1][0]
+
+
+def _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id):
+    """
+    Evaluates a first-concession grant note (see /lucid Step 3) against the one-level cap
+    (see _one_level_step - the grant is unconditional but capped to a single grid step, never
+    jumped straight to the candidate's full ask). If target_issue_id is given, only that issue
+    counts (the model was told exactly which one to grant); otherwise any of the six non-
+    Salary/Vacation issues counts (the model had a free choice among them).
+
+    Returns one of:
+      ('ok', None)                    - some eligible issue moved exactly one level in the
+                                         candidate's favor, or nothing could be verified either
+                                         way (benefit of the doubt - letter/date/city matching
+                                         can legitimately fail to resolve)
+      ('overshoot', (issue_id, cap))  - an eligible issue moved, but past its one-level cap
+      ('missing', None)               - nothing eligible moved at all
     """
     prior_by_id = {item['id']: item.get('status', '') for item in prior_statuses}
     candidate_ids = [target_issue_id] if target_issue_id else [
         item['id'] for item in _default_issue_statuses() if item['id'] not in ('issue-3', 'issue-7')
     ]
     saw_unknown = False
+    overshoot = None
     for issue_id in candidate_ids:
         if issue_id not in assistant_updates:
             continue
         prior_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
         direction = _compare_recruiter_value(issue_id, assistant_updates[issue_id], prior_val)
-        if direction == 'worse':  # worse for the recruiter = a real gift to the candidate
-            return True
+        if direction == 'worse':  # worse for the recruiter = moved in the candidate's favor
+            cap_value = _one_level_step(issue_id, prior_val)
+            if cap_value is not None and _compare_recruiter_value(issue_id, assistant_updates[issue_id], cap_value) == 'worse':
+                overshoot = (issue_id, cap_value)  # moved further than the one-level cap allows
+                continue
+            return ('ok', None)
         if direction == 'unknown':
             saw_unknown = True
-    return saw_unknown
+    if saw_unknown:
+        return ('ok', None)
+    if overshoot:
+        return ('overshoot', overshoot)
+    return ('missing', None)
 
 
 # --- Round-based concession pacing targets (both conditions) ---
@@ -1006,21 +1048,41 @@ def lucid():
                             in_hold_firm_window = turn_number <= HOLD_FIRM_ROUNDS
                             prosocial_first_concession_used = True  # consumed either way - see comment above
                             if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
-                                # Requested issue is grantable outright.
+                                # Requested issue is grantable outright - but capped to ONE
+                                # grid step toward the candidate, not a jump straight to
+                                # whatever they specifically asked for (see _one_level_step).
                                 first_concession_target_issue = requested_issue_id
                                 requested_issue_label = next(
                                     (item['label'] for item in _default_issue_statuses() if item['id'] == requested_issue_id),
                                     requested_issue_id
                                 )
-                                first_concession_note = (
-                                    f"[System note: this is the candidate's first concession this negotiation. "
-                                    f"Per your one-time first-concession exception, grant their request on "
-                                    f"{requested_issue_label} generously and unconditionally in this reply. "
-                                    f"Do NOT accept whatever concession they offered in return, even though "
-                                    f"they offered it - explicitly tell them it isn't needed, and leave every "
-                                    f"other issue exactly at its current value this round. This is a pure, "
-                                    f"no-strings-attached gift on {requested_issue_label} only.]"
-                                )
+                                requested_prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                requested_prior_value = requested_prior_by_id.get(requested_issue_id) or RECRUITER_OPENING_OFFER.get(requested_issue_id)
+                                one_level_value = _one_level_step(requested_issue_id, requested_prior_value)
+                                if one_level_value:
+                                    first_concession_note = (
+                                        f"[System note: this is the candidate's first concession this negotiation. "
+                                        f"Per your one-time first-concession exception, move {requested_issue_label} "
+                                        f"ONE step in the candidate's favor this reply - specifically to "
+                                        f"{one_level_value} - unconditionally. Do NOT jump straight to whatever "
+                                        f"they specifically asked for, even if it's less generous than their "
+                                        f"request - one step only. Do NOT accept whatever concession they offered "
+                                        f"in return, even though they offered it - explicitly tell them it isn't "
+                                        f"needed, and leave every other issue exactly at its current value this "
+                                        f"round.]"
+                                    )
+                                else:
+                                    # Already at the most candidate-favorable grid value for
+                                    # this issue - nothing left to give on it specifically.
+                                    first_concession_note = (
+                                        f"[System note: this is the candidate's first concession this negotiation, "
+                                        f"but {requested_issue_label} is already at its most candidate-favorable "
+                                        f"value - there's nothing left to move there. As a one-time goodwill "
+                                        f"gesture instead, pick ONE of your other issues and move it ONE step in "
+                                        f"the candidate's favor, unconditionally, even if they haven't "
+                                        f"specifically asked for it.]"
+                                    )
+                                    first_concession_target_issue = None
                                 print(f"[INFO /lucid] Prosocial first-concession exception triggered on {requested_issue_label}") # Vercel Log
                             elif requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window:
                                 # Genuinely can't grant the literal ask yet (still in the
@@ -1032,11 +1094,12 @@ def lucid():
                                     f"but you cannot move on Salary or Vacation Time right now (still in your "
                                     f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
                                     f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
-                                    f"Date, Moving Expense Coverage, or Location) and grant the candidate's "
-                                    f"preferred value on it generously and unconditionally in this reply, even "
-                                    f"if they haven't specifically asked for it - explain you can't move on "
-                                    f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
-                                    f"Vacation Time.]"
+                                    f"Date, Moving Expense Coverage, or Location) and move it ONE step in the "
+                                    f"candidate's favor, unconditionally, in this reply, even if they haven't "
+                                    f"specifically asked for it - explain you can't move on salary/vacation yet "
+                                    f"but want to show good faith. Do NOT jump straight to their ideal value on "
+                                    f"whatever issue you pick - one step only. Do NOT move Salary or Vacation "
+                                    f"Time.]"
                                 )
                                 print("[INFO /lucid] Prosocial first-concession exception triggered (hold-firm window - granting an alternate issue instead)") # Vercel Log
                             else:
@@ -1053,9 +1116,10 @@ def lucid():
                                     f"[System note: this is the candidate's first concession this negotiation. "
                                     f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
                                     f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
-                                    f"Location) and grant the candidate's preferred value on it generously and "
-                                    f"unconditionally in this reply, even if they haven't specifically asked for "
-                                    f"it. Keep handling Salary and Vacation Time through your normal concession "
+                                    f"Location) and move it ONE step in the candidate's favor, unconditionally, "
+                                    f"in this reply, even if they haven't specifically asked for it. Do NOT jump "
+                                    f"straight to their ideal value on whatever issue you pick - one step only. "
+                                    f"Keep handling Salary and Vacation Time through your normal concession "
                                     f"schedule separately - this one-time gift is on a different issue.]"
                                 )
                                 print("[INFO /lucid] Prosocial first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)") # Vercel Log
@@ -1248,44 +1312,58 @@ def lucid():
                             # the exception fired this round) ---
                             # Independent of the two checks above (this can fire any round,
                             # including inside the hold-firm window, so it isn't chained onto
-                            # their if/elif). The note above asks for a specific gift; this
-                            # verifies the reply actually gave it, using the real payoff table
-                            # rather than trusting the model followed through.
-                            if first_concession_note and not _first_concession_grant_satisfied(
-                                prior_issue_statuses, assistant_updates, first_concession_target_issue
-                            ):
-                                if first_concession_target_issue:
-                                    grant_label = next(
-                                        (item['label'] for item in _default_issue_statuses() if item['id'] == first_concession_target_issue),
-                                        first_concession_target_issue
-                                    )
-                                    grant_instruction = f"grant your one-time gift on {grant_label}"
-                                else:
-                                    grant_instruction = (
-                                        "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
-                                        "Starting Date, Moving Expense Coverage, or Location) and grant your one-time "
-                                        "gift on it"
-                                    )
-                                print("[WARN /lucid] First-concession grant not honored, regenerating") # Vercel Log
-                                correction_note = (
-                                    f"[System note: your previous draft reply did not actually grant your one-time "
-                                    f"first-concession gift - no issue moved in the candidate's favor. Write your "
-                                    f"reply again: {grant_instruction}, generously and unconditionally, in this "
-                                    f"reply.]"
+                            # their if/elif). The note above asks for a specific, ONE-LEVEL
+                            # gift; this verifies the reply actually gave it - and gave no
+                            # more than that - using the real payoff table rather than
+                            # trusting the model followed through.
+                            if first_concession_note:
+                                grant_status, grant_info = _first_concession_grant_status(
+                                    prior_issue_statuses, assistant_updates, first_concession_target_issue
                                 )
-                                retry_text = _call_openai_completion(
-                                    messages_for_api + [{'role': 'system', 'content': correction_note}],
-                                    model, used_temperature, used_seed, openai_api_key
-                                )
-                                if retry_text:
-                                    generated_text = retry_text
-                                    assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-                                    if not _first_concession_grant_satisfied(
-                                        prior_issue_statuses, assistant_updates, first_concession_target_issue
-                                    ):
-                                        print("[WARN /lucid] First-concession grant still not honored after regeneration - keeping it, not retrying again") # Vercel Log
-                                else:
-                                    print("[WARN /lucid] First-concession regeneration call failed - keeping original reply") # Vercel Log
+                                if grant_status != 'ok':
+                                    if grant_status == 'overshoot':
+                                        overshoot_issue_id, cap_value = grant_info or (None, None)
+                                        overshoot_label = next(
+                                            (item['label'] for item in _default_issue_statuses() if item['id'] == overshoot_issue_id),
+                                            overshoot_issue_id
+                                        )
+                                        grant_instruction = (
+                                            f"your one-time gift moved {overshoot_label} further than the single "
+                                            f"grid step this exception allows - scale it back to exactly {cap_value}, "
+                                            f"not the candidate's full ask"
+                                        )
+                                    elif first_concession_target_issue:
+                                        grant_label = next(
+                                            (item['label'] for item in _default_issue_statuses() if item['id'] == first_concession_target_issue),
+                                            first_concession_target_issue
+                                        )
+                                        grant_instruction = f"grant your one-time, one-step gift on {grant_label}"
+                                    else:
+                                        grant_instruction = (
+                                            "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
+                                            "Starting Date, Moving Expense Coverage, or Location) and grant your "
+                                            "one-time, one-step gift on it"
+                                        )
+                                    print(f"[WARN /lucid] First-concession grant not honored ({grant_status}), regenerating") # Vercel Log
+                                    correction_note = (
+                                        f"[System note: your previous draft reply did not correctly grant your "
+                                        f"one-time first-concession gift. Write your reply again: {grant_instruction}, "
+                                        f"unconditionally, in this reply.]"
+                                    )
+                                    retry_text = _call_openai_completion(
+                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        model, used_temperature, used_seed, openai_api_key
+                                    )
+                                    if retry_text:
+                                        generated_text = retry_text
+                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                        recheck_status, _ = _first_concession_grant_status(
+                                            prior_issue_statuses, assistant_updates, first_concession_target_issue
+                                        )
+                                        if recheck_status != 'ok':
+                                            print(f"[WARN /lucid] First-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again") # Vercel Log
+                                    else:
+                                        print("[WARN /lucid] First-concession regeneration call failed - keeping original reply") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {

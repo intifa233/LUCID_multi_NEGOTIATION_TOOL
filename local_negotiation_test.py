@@ -174,20 +174,37 @@ def main():
                 in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
                 first_concession_used = True  # consumed either way
                 if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                    # Grantable outright - but capped to ONE grid step toward the candidate,
+                    # not a jump straight to whatever they specifically asked for.
                     first_concession_target_issue = requested_issue_id
                     requested_issue_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == requested_issue_id),
                         requested_issue_id
                     )
-                    note = (
-                        f"[System note: this is the candidate's first concession this negotiation. "
-                        f"Per your one-time first-concession exception, grant their request on "
-                        f"{requested_issue_label} generously and unconditionally in this reply. "
-                        f"Do NOT accept whatever concession they offered in return, even though "
-                        f"they offered it - explicitly tell them it isn't needed, and leave every "
-                        f"other issue exactly at its current value this round. This is a pure, "
-                        f"no-strings-attached gift on {requested_issue_label} only.]"
-                    )
+                    requested_prior_by_id = {item['id']: item['status'] for item in current_statuses}
+                    requested_prior_value = requested_prior_by_id.get(requested_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(requested_issue_id)
+                    one_level_value = lucid._one_level_step(requested_issue_id, requested_prior_value)
+                    if one_level_value:
+                        note = (
+                            f"[System note: this is the candidate's first concession this negotiation. "
+                            f"Per your one-time first-concession exception, move {requested_issue_label} "
+                            f"ONE step in the candidate's favor this reply - specifically to "
+                            f"{one_level_value} - unconditionally. Do NOT jump straight to whatever they "
+                            f"specifically asked for, even if it's less generous than their request - one "
+                            f"step only. Do NOT accept whatever concession they offered in return, even "
+                            f"though they offered it - explicitly tell them it isn't needed, and leave "
+                            f"every other issue exactly at its current value this round.]"
+                        )
+                    else:
+                        note = (
+                            f"[System note: this is the candidate's first concession this negotiation, "
+                            f"but {requested_issue_label} is already at its most candidate-favorable "
+                            f"value - there's nothing left to move there. As a one-time goodwill gesture "
+                            f"instead, pick ONE of your other issues and move it ONE step in the "
+                            f"candidate's favor, unconditionally, even if they haven't specifically asked "
+                            f"for it.]"
+                        )
+                        first_concession_target_issue = None
                     print(f"  [first-concession exception triggered on {requested_issue_label}]")
                 elif requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window:
                     # Only case where the hold-firm framing is actually true.
@@ -196,11 +213,12 @@ def main():
                         f"but you cannot move on Salary or Vacation Time right now (still in your "
                         f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
                         f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
-                        f"Date, Moving Expense Coverage, or Location) and grant the candidate's "
-                        f"preferred value on it generously and unconditionally in this reply, even "
-                        f"if they haven't specifically asked for it - explain you can't move on "
-                        f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
-                        f"Vacation Time.]"
+                        f"Date, Moving Expense Coverage, or Location) and move it ONE step in the "
+                        f"candidate's favor, unconditionally, in this reply, even if they haven't "
+                        f"specifically asked for it - explain you can't move on salary/vacation yet "
+                        f"but want to show good faith. Do NOT jump straight to their ideal value on "
+                        f"whatever issue you pick - one step only. Do NOT move Salary or Vacation "
+                        f"Time.]"
                     )
                     print("  [first-concession exception triggered (hold-firm window - granting an alternate issue instead)]")
                 else:
@@ -211,9 +229,10 @@ def main():
                         f"[System note: this is the candidate's first concession this negotiation. "
                         f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
                         f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
-                        f"Location) and grant the candidate's preferred value on it generously and "
-                        f"unconditionally in this reply, even if they haven't specifically asked for "
-                        f"it. Keep handling Salary and Vacation Time through your normal concession "
+                        f"Location) and move it ONE step in the candidate's favor, unconditionally, in "
+                        f"this reply, even if they haven't specifically asked for it. Do NOT jump "
+                        f"straight to their ideal value on whatever issue you pick - one step only. "
+                        f"Keep handling Salary and Vacation Time through your normal concession "
                         f"schedule separately - this one-time gift is on a different issue.]"
                     )
                     print("  [first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)]")
@@ -289,39 +308,55 @@ def main():
                     print("  [regeneration call failed - keeping original (under-conceded) reply]")
 
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
-        # the reply actually granted the gift (using the payoff table), regenerate once if not ---
-        if first_concession_note_fired and not lucid._first_concession_grant_satisfied(
-            current_statuses, assistant_updates, first_concession_target_issue
-        ):
-            if first_concession_target_issue:
-                grant_label = next(
-                    (item['label'] for item in lucid._default_issue_statuses() if item['id'] == first_concession_target_issue),
-                    first_concession_target_issue
-                )
-                grant_instruction = f"grant your one-time gift on {grant_label}"
-            else:
-                grant_instruction = (
-                    "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
-                    "Starting Date, Moving Expense Coverage, or Location) and grant your one-time "
-                    "gift on it"
-                )
-            print("  [first-concession grant not honored, regenerating]")
-            correction_note = (
-                f"[System note: your previous draft reply did not actually grant your one-time "
-                f"first-concession gift - no issue moved in the candidate's favor. Write your "
-                f"reply again: {grant_instruction}, generously and unconditionally, in this reply.]"
+        # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
+        if first_concession_note_fired:
+            grant_status, grant_info = lucid._first_concession_grant_status(
+                current_statuses, assistant_updates, first_concession_target_issue
             )
-            retry_text = lucid._call_openai_completion(
-                messages_for_api + [{'role': 'system', 'content': correction_note}],
-                model, temperature, None, api_key
-            )
-            if retry_text:
-                reply = retry_text
-                assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                if not lucid._first_concession_grant_satisfied(current_statuses, assistant_updates, first_concession_target_issue):
-                    print("  [first-concession grant still not honored after regeneration - keeping it, not retrying again]")
-            else:
-                print("  [first-concession regeneration call failed - keeping original reply]")
+            if grant_status != 'ok':
+                if grant_status == 'overshoot':
+                    overshoot_issue_id, cap_value = grant_info or (None, None)
+                    overshoot_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == overshoot_issue_id),
+                        overshoot_issue_id
+                    )
+                    grant_instruction = (
+                        f"your one-time gift moved {overshoot_label} further than the single grid step "
+                        f"this exception allows - scale it back to exactly {cap_value}, not the "
+                        f"candidate's full ask"
+                    )
+                elif first_concession_target_issue:
+                    grant_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == first_concession_target_issue),
+                        first_concession_target_issue
+                    )
+                    grant_instruction = f"grant your one-time, one-step gift on {grant_label}"
+                else:
+                    grant_instruction = (
+                        "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
+                        "Starting Date, Moving Expense Coverage, or Location) and grant your one-time, "
+                        "one-step gift on it"
+                    )
+                print(f"  [first-concession grant not honored ({grant_status}), regenerating]")
+                correction_note = (
+                    f"[System note: your previous draft reply did not correctly grant your one-time "
+                    f"first-concession gift. Write your reply again: {grant_instruction}, "
+                    f"unconditionally, in this reply.]"
+                )
+                retry_text = lucid._call_openai_completion(
+                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    model, temperature, None, api_key
+                )
+                if retry_text:
+                    reply = retry_text
+                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                    recheck_status, _ = lucid._first_concession_grant_status(
+                        current_statuses, assistant_updates, first_concession_target_issue
+                    )
+                    if recheck_status != 'ok':
+                        print(f"  [first-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again]")
+                else:
+                    print("  [first-concession regeneration call failed - keeping original reply]")
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
