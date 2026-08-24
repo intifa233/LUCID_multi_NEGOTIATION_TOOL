@@ -198,11 +198,24 @@ def _detect_first_concession_llm(user_message, openai_api_key):
     (worse than the round-counting problem solved elsewhere by injecting the round
     number directly).
 
-    Returns {'is_concession': False, 'requested_issue_id': None} on any failure, or
-    if no message/key was given, so this never blocks the main call.
+    Also extracts conceded_issue_id/conceded_new_value - which issue the candidate is
+    giving ground on and the specific new value they're offering - purely as a linguistic
+    read of the message. This is deliberately NOT trusted on its own: the caller cross-
+    checks it against RECRUITER_PAYOFF_TABLE before treating is_concession as true, because
+    "sounds like a concession" and "is actually favorable to the recruiter" are different
+    questions (e.g. a candidate offering an EARLIER start date reads like a concession but
+    scores WORSE for the recruiter on the real payoff table - not a real concession at all).
+
+    Returns {'is_concession': False, 'requested_issue_id': None, 'conceded_issue_id': None,
+    'conceded_new_value': None} on any failure, or if no message/key was given, so this
+    never blocks the main call.
     """
+    empty_result = {
+        'is_concession': False, 'requested_issue_id': None,
+        'conceded_issue_id': None, 'conceded_new_value': None
+    }
     if not user_message or not openai_api_key:
-        return {'is_concession': False, 'requested_issue_id': None}
+        return dict(empty_result)
 
     defaults = _default_issue_statuses()
     valid_issue_ids = {item['id'] for item in defaults}
@@ -217,9 +230,14 @@ def _detect_first_concession_llm(user_message, openai_api_key):
         "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
         "Coverage, issue-7 Salary, issue-8 Location. "
         "Return ONLY valid JSON in this exact shape: "
-        "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\"}. "
+        "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\", "
+        "\"conceded_issue_id\": \"issue-4\", \"conceded_new_value\": \"July 1\"}. "
         "requested_issue_id is the issue the candidate is asking the RECRUITER to move on "
-        "or improve - use null if is_concession is false or the requested issue is unclear."
+        "or improve - use null if is_concession is false or the requested issue is unclear. "
+        "conceded_issue_id/conceded_new_value describe what the candidate is giving ground "
+        "on: the issue, and the specific concrete new value they're now offering on it (e.g. "
+        "'July 1', 'Division C', '80%') - not a description. Use null for both if "
+        "is_concession is false or this is unclear."
     )
 
     payload = {
@@ -229,7 +247,7 @@ def _detect_first_concession_llm(user_message, openai_api_key):
             {'role': 'user', 'content': str(user_message)}
         ],
         'temperature': 0.0,  # deterministic classification
-        'max_tokens': 100,
+        'max_tokens': 150,
         'response_format': {'type': 'json_object'}
     }
     headers = {
@@ -241,7 +259,7 @@ def _detect_first_concession_llm(user_message, openai_api_key):
         resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
         if resp.status_code != 200:
             print(f"[INFO] First-concession detection returned {resp.status_code}, skipping")
-            return {'is_concession': False, 'requested_issue_id': None}
+            return dict(empty_result)
 
         raw = resp.json()['choices'][0]['message']['content']
         parsed = json.loads(raw)
@@ -249,11 +267,21 @@ def _detect_first_concession_llm(user_message, openai_api_key):
         requested_issue_id = parsed.get('requested_issue_id')
         if requested_issue_id not in valid_issue_ids:
             requested_issue_id = None
-        return {'is_concession': is_concession, 'requested_issue_id': requested_issue_id}
+        conceded_issue_id = parsed.get('conceded_issue_id')
+        if conceded_issue_id not in valid_issue_ids:
+            conceded_issue_id = None
+        conceded_new_value = parsed.get('conceded_new_value')
+        conceded_new_value = str(conceded_new_value).strip() if conceded_new_value else None
+        return {
+            'is_concession': is_concession,
+            'requested_issue_id': requested_issue_id,
+            'conceded_issue_id': conceded_issue_id,
+            'conceded_new_value': conceded_new_value
+        }
 
     except Exception as e:
         print(f"[INFO] First-concession detection exception: {e}")
-        return {'is_concession': False, 'requested_issue_id': None}
+        return dict(empty_result)
 
 
 # --- Hold-firm enforcement (rounds 1-N, both conditions) ---
@@ -264,6 +292,36 @@ def _detect_first_concession_llm(user_message, openai_api_key):
 HOLD_FIRM_ROUNDS = 3
 HOLD_FIRM_ANCHOR = {'issue-7': '$84,000', 'issue-3': '10 days'}  # Salary, Vacation Time
 
+# Full opening-offer baseline, all 8 issues - matches [Starting point] in prompts.yaml
+# exactly (same values, both conditions). HOLD_FIRM_ANCHOR above only covers Salary/
+# Vacation; checks that need a fallback "prior value" for the other six issues (the
+# first-concession directional check and its grant safety net) use this instead. Keep in
+# sync with prompts.yaml if the case's opening offer ever changes.
+RECRUITER_OPENING_OFFER = {
+    'issue-1': '4%', 'issue-2': 'Division B', 'issue-3': '10 days', 'issue-4': 'July 15',
+    'issue-5': '70%', 'issue-6': 'Plan D', 'issue-7': '$84,000', 'issue-8': 'Atlanta',
+}
+
+
+def _parse_number(text):
+    """
+    Parses a loose numeric expression - '$86,000', '86000', '86k', '15 days', '10%' - into
+    a plain int, or None if nothing parseable is found. Handles the 'k' thousands shorthand
+    (e.g. '84k' -> 84000): a plain [\\d,]+ regex would otherwise truncate that to 84, which
+    then silently nearest-matches against payoff-table figures in the tens of thousands and
+    returns a badly wrong point value instead of failing loudly. Shared by _matches_anchor
+    and _lookup_recruiter_points so both get this fix in one place.
+    """
+    if not text:
+        return None
+    m = re.search(r'([\d,]+(?:\.\d+)?)\s*([kK])?', str(text))
+    if not m or not m.group(1):
+        return None
+    num = float(m.group(1).replace(',', ''))
+    if m.group(2):
+        num *= 1000
+    return int(round(num))
+
 
 def _matches_anchor(extracted_value, anchor_value):
     """
@@ -272,11 +330,8 @@ def _matches_anchor(extracted_value, anchor_value):
     violation over punctuation alone. Falls back to a case-insensitive exact string match
     if either side has no parseable number.
     """
-    def extract_number(s):
-        m = re.search(r'[\d,]+', str(s) or '')
-        return m.group(0).replace(',', '') if m else None
-    extracted_num = extract_number(extracted_value)
-    anchor_num = extract_number(anchor_value)
+    extracted_num = _parse_number(extracted_value)
+    anchor_num = _parse_number(anchor_value)
     if extracted_num is not None and anchor_num is not None:
         return extracted_num == anchor_num
     return str(extracted_value).strip().lower() == str(anchor_value).strip().lower()
@@ -325,13 +380,12 @@ def _lookup_recruiter_points(issue_id, raw_value):
     options = table['options']
 
     if table['kind'] == 'number':
-        m = re.search(r'[\d,]+', text)
-        if not m:
+        num = _parse_number(text)
+        if num is None:
             return None
-        num = int(m.group(0).replace(',', ''))
         best_pts, best_diff = None, None
         for label, pts in options:
-            onum = int(re.search(r'[\d,]+', label).group(0).replace(',', ''))
+            onum = _parse_number(label)
             diff = abs(onum - num)
             if best_diff is None or diff < best_diff:
                 best_pts, best_diff = pts, diff
@@ -386,6 +440,34 @@ def _compare_recruiter_value(issue_id, new_value, prior_value):
     if new_pts < prior_pts:
         return 'worse'
     return 'same'
+
+
+def _first_concession_grant_satisfied(prior_statuses, assistant_updates, target_issue_id):
+    """
+    Checks whether a first-concession grant note (see /lucid Step 3) was actually honored:
+    did at least one eligible issue move to a value that's favorable to the CANDIDATE (i.e.
+    worse for the recruiter) versus its prior value? If target_issue_id is given, only that
+    issue counts (the model was told exactly which one to grant); otherwise any of the six
+    non-Salary/Vacation issues counts (the model had a free choice among them). Returns True
+    if satisfied, or if nothing could be verified either way (benefit of the doubt, since
+    letter/date/city matching can legitimately fail to resolve) - only a confirmed 'same' or
+    missing-entirely reading counts as non-compliant.
+    """
+    prior_by_id = {item['id']: item.get('status', '') for item in prior_statuses}
+    candidate_ids = [target_issue_id] if target_issue_id else [
+        item['id'] for item in _default_issue_statuses() if item['id'] not in ('issue-3', 'issue-7')
+    ]
+    saw_unknown = False
+    for issue_id in candidate_ids:
+        if issue_id not in assistant_updates:
+            continue
+        prior_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+        direction = _compare_recruiter_value(issue_id, assistant_updates[issue_id], prior_val)
+        if direction == 'worse':  # worse for the recruiter = a real gift to the candidate
+            return True
+        if direction == 'unknown':
+            saw_unknown = True
+    return saw_unknown
 
 
 # --- Round-based concession pacing targets (both conditions) ---
@@ -893,12 +975,39 @@ def lucid():
                     # track on its own.
                     prosocial_first_concession_used = bool(body.get('prosocial_first_concession_used'))
                     first_concession_note = None
+                    # Set only when the grant targets one specific, known issue (the
+                    # candidate's own ask was grantable outright) - lets the safety net
+                    # below (Step 5) verify compliance against that exact issue instead of
+                    # just trusting the note was followed. Stays None for the "pick any
+                    # alternate issue" cases, where the model has a free choice.
+                    first_concession_target_issue = None
                     if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
                         concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key)
+                        # Don't just trust the classifier's "is_concession" framing - cross-
+                        # check the specific issue/value it says the candidate is giving
+                        # ground on against the real payoff table. "Sounds like a concession"
+                        # and "is actually favorable to the recruiter" are different questions
+                        # (e.g. an EARLIER start date reads like a concession but scores WORSE
+                        # for the recruiter on the real table - not a real concession at all).
+                        # Only overrides on a confirmed 'worse' reading; 'same'/'unknown' get
+                        # the benefit of the doubt since the extraction can legitimately fail
+                        # to match (letter/date/city text is looser than plain numbers).
+                        if concession_check.get('is_concession'):
+                            conceded_issue_id = concession_check.get('conceded_issue_id')
+                            conceded_new_value = concession_check.get('conceded_new_value')
+                            if conceded_issue_id and conceded_new_value:
+                                prior_by_id_cc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or RECRUITER_OPENING_OFFER.get(conceded_issue_id)
+                                if _compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value) == 'worse':
+                                    print(f"[INFO /lucid] First-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's WORSE for the recruiter - overriding to not-a-concession") # Vercel Log
+                                    concession_check['is_concession'] = False
                         if concession_check.get('is_concession'):
                             requested_issue_id = concession_check.get('requested_issue_id')
+                            in_hold_firm_window = turn_number <= HOLD_FIRM_ROUNDS
                             prosocial_first_concession_used = True  # consumed either way - see comment above
                             if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                                # Requested issue is grantable outright.
+                                first_concession_target_issue = requested_issue_id
                                 requested_issue_label = next(
                                     (item['label'] for item in _default_issue_statuses() if item['id'] == requested_issue_id),
                                     requested_issue_id
@@ -913,7 +1022,11 @@ def lucid():
                                     f"no-strings-attached gift on {requested_issue_label} only.]"
                                 )
                                 print(f"[INFO /lucid] Prosocial first-concession exception triggered on {requested_issue_label}") # Vercel Log
-                            else:
+                            elif requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window:
+                                # Genuinely can't grant the literal ask yet (still in the
+                                # hold-firm window) - fall back to an alternate-issue gift.
+                                # This is the ONLY case where the hold-firm framing below is
+                                # actually true.
                                 first_concession_note = (
                                     f"[System note: this is the candidate's first concession this negotiation, "
                                     f"but you cannot move on Salary or Vacation Time right now (still in your "
@@ -925,7 +1038,27 @@ def lucid():
                                     f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
                                     f"Vacation Time.]"
                                 )
-                                print("[INFO /lucid] Prosocial first-concession exception triggered (requested issue unavailable - granting an alternate issue instead)") # Vercel Log
+                                print("[INFO /lucid] Prosocial first-concession exception triggered (hold-firm window - granting an alternate issue instead)") # Vercel Log
+                            else:
+                                # Either the classifier couldn't tell which issue was
+                                # requested, or it was Salary/Vacation but the hold-firm
+                                # window has already passed - "still in your hold-firm
+                                # window" would be a false claim in either case (this was a
+                                # bug: the old code used that wording unconditionally here).
+                                # Still keep the grant itself off Salary/Vacation via this
+                                # one-time exception specifically (that's governed by the
+                                # normal pacing schedule instead), but explain why in terms
+                                # that are actually true.
+                                first_concession_note = (
+                                    f"[System note: this is the candidate's first concession this negotiation. "
+                                    f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
+                                    f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
+                                    f"Location) and grant the candidate's preferred value on it generously and "
+                                    f"unconditionally in this reply, even if they haven't specifically asked for "
+                                    f"it. Keep handling Salary and Vacation Time through your normal concession "
+                                    f"schedule separately - this one-time gift is on a different issue.]"
+                                )
+                                print("[INFO /lucid] Prosocial first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)") # Vercel Log
 
                     # --- Step 4: Call OpenAI API ---
                     openai_url = 'https://api.openai.com/v1/chat/completions'
@@ -1110,6 +1243,49 @@ def lucid():
                                             print(f"[WARN /lucid] Pacing still not met on {still_under} after regeneration - keeping it, not retrying again") # Vercel Log
                                     else:
                                         print("[WARN /lucid] Pacing regeneration call failed - keeping original (under-conceded) reply") # Vercel Log
+
+                            # --- First-concession grant safety net (Prosocial only, whenever
+                            # the exception fired this round) ---
+                            # Independent of the two checks above (this can fire any round,
+                            # including inside the hold-firm window, so it isn't chained onto
+                            # their if/elif). The note above asks for a specific gift; this
+                            # verifies the reply actually gave it, using the real payoff table
+                            # rather than trusting the model followed through.
+                            if first_concession_note and not _first_concession_grant_satisfied(
+                                prior_issue_statuses, assistant_updates, first_concession_target_issue
+                            ):
+                                if first_concession_target_issue:
+                                    grant_label = next(
+                                        (item['label'] for item in _default_issue_statuses() if item['id'] == first_concession_target_issue),
+                                        first_concession_target_issue
+                                    )
+                                    grant_instruction = f"grant your one-time gift on {grant_label}"
+                                else:
+                                    grant_instruction = (
+                                        "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
+                                        "Starting Date, Moving Expense Coverage, or Location) and grant your one-time "
+                                        "gift on it"
+                                    )
+                                print("[WARN /lucid] First-concession grant not honored, regenerating") # Vercel Log
+                                correction_note = (
+                                    f"[System note: your previous draft reply did not actually grant your one-time "
+                                    f"first-concession gift - no issue moved in the candidate's favor. Write your "
+                                    f"reply again: {grant_instruction}, generously and unconditionally, in this "
+                                    f"reply.]"
+                                )
+                                retry_text = _call_openai_completion(
+                                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                    model, used_temperature, used_seed, openai_api_key
+                                )
+                                if retry_text:
+                                    generated_text = retry_text
+                                    assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                    if not _first_concession_grant_satisfied(
+                                        prior_issue_statuses, assistant_updates, first_concession_target_issue
+                                    ):
+                                        print("[WARN /lucid] First-concession grant still not honored after regeneration - keeping it, not retrying again") # Vercel Log
+                                else:
+                                    print("[WARN /lucid] First-concession regeneration call failed - keeping original reply") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {

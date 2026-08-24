@@ -82,13 +82,12 @@ def main():
 
     turn_number = 0
     first_concession_used = False
-    # Accumulated Salary/Vacation Time state, same shape lucid.py tracks via issue_statuses -
-    # needed for the pacing-target check below (has the recruiter actually reached its
-    # required concession level by the schedule's deadline, or is it still sitting anchored).
-    current_statuses = [
-        {'id': 'issue-3', 'label': 'Vacation Time', 'status': lucid.HOLD_FIRM_ANCHOR['issue-3']},
-        {'id': 'issue-7', 'label': 'Salary', 'status': lucid.HOLD_FIRM_ANCHOR['issue-7']},
-    ]
+    # Full 8-issue accumulated state, same shape lucid.py tracks via issue_statuses (starts
+    # blank, same as a real round-1 request with no prior issue_statuses echoed back yet).
+    # Needed for the pacing-target check (Salary/Vacation) and now also the first-concession
+    # payoff-table checks, which need a prior value for whichever issue was conceded/granted,
+    # not just Salary/Vacation.
+    current_statuses = lucid._default_issue_statuses()
 
     print(f"\n--- Testing '{condition_key}' (model={model}, temperature={temperature}) ---")
     print("Type a candidate message and press Enter. Type 'quit' to stop.\n")
@@ -154,12 +153,28 @@ def main():
         # Trigger (any concession) and grant (never Salary/Vacation) are decoupled: the
         # exception consumes on ANY detected concession, but if the candidate specifically
         # asked for Salary/Vacation, the model is told to grant a different issue instead. ---
+        first_concession_target_issue = None
         if condition_key == 'prosocial' and not first_concession_used:
             check = lucid._detect_first_concession_llm(user_message, api_key)
+            # Cross-check the classifier's framing against the real payoff table before
+            # trusting it - "sounds like a concession" isn't the same as "actually favorable
+            # to the recruiter" (e.g. an earlier start date reads like a concession but
+            # scores worse for the recruiter on the real table).
+            if check.get('is_concession'):
+                conceded_issue_id = check.get('conceded_issue_id')
+                conceded_new_value = check.get('conceded_new_value')
+                if conceded_issue_id and conceded_new_value:
+                    prior_by_id_cc = {item['id']: item['status'] for item in current_statuses}
+                    conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(conceded_issue_id)
+                    if lucid._compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value) == 'worse':
+                        print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's WORSE for the recruiter - overriding to not-a-concession]")
+                        check['is_concession'] = False
             if check.get('is_concession'):
                 requested_issue_id = check.get('requested_issue_id')
+                in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
                 first_concession_used = True  # consumed either way
                 if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
+                    first_concession_target_issue = requested_issue_id
                     requested_issue_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == requested_issue_id),
                         requested_issue_id
@@ -174,7 +189,8 @@ def main():
                         f"no-strings-attached gift on {requested_issue_label} only.]"
                     )
                     print(f"  [first-concession exception triggered on {requested_issue_label}]")
-                else:
+                elif requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window:
+                    # Only case where the hold-firm framing is actually true.
                     note = (
                         f"[System note: this is the candidate's first concession this negotiation, "
                         f"but you cannot move on Salary or Vacation Time right now (still in your "
@@ -186,8 +202,27 @@ def main():
                         f"salary/vacation yet but want to show good faith. Do NOT move Salary or "
                         f"Vacation Time.]"
                     )
-                    print("  [first-concession exception triggered (requested issue unavailable - granting an alternate issue instead)]")
+                    print("  [first-concession exception triggered (hold-firm window - granting an alternate issue instead)]")
+                else:
+                    # Classifier's ask was unclear, or it was Salary/Vacation but the
+                    # hold-firm window already passed - don't claim "still in your
+                    # hold-firm window" when that isn't true.
+                    note = (
+                        f"[System note: this is the candidate's first concession this negotiation. "
+                        f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
+                        f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
+                        f"Location) and grant the candidate's preferred value on it generously and "
+                        f"unconditionally in this reply, even if they haven't specifically asked for "
+                        f"it. Keep handling Salary and Vacation Time through your normal concession "
+                        f"schedule separately - this one-time gift is on a different issue.]"
+                    )
+                    print("  [first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)]")
                 messages_for_api.append({'role': 'system', 'content': note})
+                first_concession_note_fired = True
+            else:
+                first_concession_note_fired = False
+        else:
+            first_concession_note_fired = False
 
         try:
             reply = call_openai(messages_for_api, api_key, model, temperature)
@@ -252,6 +287,41 @@ def main():
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
                 else:
                     print("  [regeneration call failed - keeping original (under-conceded) reply]")
+
+        # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
+        # the reply actually granted the gift (using the payoff table), regenerate once if not ---
+        if first_concession_note_fired and not lucid._first_concession_grant_satisfied(
+            current_statuses, assistant_updates, first_concession_target_issue
+        ):
+            if first_concession_target_issue:
+                grant_label = next(
+                    (item['label'] for item in lucid._default_issue_statuses() if item['id'] == first_concession_target_issue),
+                    first_concession_target_issue
+                )
+                grant_instruction = f"grant your one-time gift on {grant_label}"
+            else:
+                grant_instruction = (
+                    "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
+                    "Starting Date, Moving Expense Coverage, or Location) and grant your one-time "
+                    "gift on it"
+                )
+            print("  [first-concession grant not honored, regenerating]")
+            correction_note = (
+                f"[System note: your previous draft reply did not actually grant your one-time "
+                f"first-concession gift - no issue moved in the candidate's favor. Write your "
+                f"reply again: {grant_instruction}, generously and unconditionally, in this reply.]"
+            )
+            retry_text = lucid._call_openai_completion(
+                messages_for_api + [{'role': 'system', 'content': correction_note}],
+                model, temperature, None, api_key
+            )
+            if retry_text:
+                reply = retry_text
+                assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                if not lucid._first_concession_grant_satisfied(current_statuses, assistant_updates, first_concession_target_issue):
+                    print("  [first-concession grant still not honored after regeneration - keeping it, not retrying again]")
+            else:
+                print("  [first-concession regeneration call failed - keeping original reply]")
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
