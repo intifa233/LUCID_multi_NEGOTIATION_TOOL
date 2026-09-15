@@ -1457,30 +1457,6 @@ def lucid():
                                 f"this reply - do not move anything beyond that without further "
                                 f"justification."
                             )
-                            # Prosocial's optional deeper step (see PROSOCIAL_STRETCH_STEP) -
-                            # only mentioned when eligible (round 8+) AND the recruiter hasn't
-                            # already reached it, and only ever as something EARNED this round
-                            # by the genuine concession above, never as a separate free item.
-                            if any(pacing_stretch_target.values()):
-                                prior_by_id_stretch = {item['id']: item.get('status', '') for item in prior_issue_statuses}
-                                stretch_still_available = []
-                                for issue_id, target in pacing_stretch_target.items():
-                                    if not target:
-                                        continue
-                                    current = prior_by_id_stretch.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
-                                    if _compare_recruiter_value(issue_id, current, target) == 'better':
-                                        label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                        stretch_still_available.append(f"{label} to {target}")
-                                if stretch_still_available:
-                                    round_note += (
-                                        f" Since the candidate is engaging constructively this late in "
-                                        f"the negotiation, you MAY ALSO stretch further toward "
-                                        f"{' and '.join(stretch_still_available)} as part of this same "
-                                        f"reciprocal move - but only if you secure something specific in "
-                                        f"return on ONE OR TWO other issues in this reply. Do not use the "
-                                        f"stretch for free; if you're not getting anything extra back for "
-                                        f"it, stick to your normal one-step move instead."
-                                    )
                         else:
                             round_note += (
                                 " The candidate did NOT make a genuine concession this round (per "
@@ -1491,6 +1467,30 @@ def lucid():
                                 "CONDITIONALLY (asking for something specific in return), but do not "
                                 "agree to or grant anything outright."
                             )
+                        # Prosocial's optional deeper step (see PROSOCIAL_STRETCH_STEP), rounds
+                        # 8-10: pacing takes priority in this window specifically, so this is
+                        # mentioned regardless of whether a genuine concession happened THIS
+                        # round - not gated on securing something back either (unlike the
+                        # ordinary "at most one other issue" reciprocity above, which is still
+                        # about issues OTHER than Salary/Vacation).
+                        if any(pacing_stretch_target.values()):
+                            prior_by_id_stretch = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                            stretch_still_available = []
+                            for issue_id, target in pacing_stretch_target.items():
+                                if not target:
+                                    continue
+                                current = prior_by_id_stretch.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
+                                if _compare_recruiter_value(issue_id, current, target) == 'better':
+                                    label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                                    stretch_still_available.append(f"{label} to {target}")
+                            if stretch_still_available:
+                                round_note += (
+                                    f" This is also within your rounds 8-10 window: you may move "
+                                    f"further toward {' and '.join(stretch_still_available)} in this "
+                                    f"reply if you judge it appropriate, without needing a fresh "
+                                    f"concession this specific round to justify it - pacing takes "
+                                    f"priority here."
+                                )
                     messages_for_api = messages + [{'role': 'system', 'content': round_note}]
                     if first_concession_note:
                         # Same ephemeral treatment as the round-number note above - fresh each call,
@@ -1641,6 +1641,12 @@ def lucid():
                                     pacing_step = pacing_target.get(issue_id)
                                     if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
                                         continue  # within what the pacing schedule itself mandates this round
+                                    stretch_step = pacing_stretch_target.get(issue_id)
+                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                        continue  # within Prosocial's optional stretch ceiling (rounds
+                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
+                                        # pacing takes priority in this window, not gated on a fresh
+                                        # concession this specific round
                                     if genuine_concession_this_round:
                                         continue  # a real concession happened - some reciprocal movement is expected
                                     ungrounded_moves.append((issue_id, item['label'], old_val))
