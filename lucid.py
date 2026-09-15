@@ -1176,7 +1176,33 @@ def lucid():
                     # otherwise, including when the exception fired but the grant never got
                     # confirmed (still missing/overshooting after the retry).
                     first_concession_announcement = None
-                    if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
+
+                    # --- General "genuine concession this round" check (BOTH conditions,
+                    # every round) ---
+                    # Reused for three things: (1) the round_note prescription below (Step 4) -
+                    # tells the model, BEFORE it drafts a reply, whether it has any
+                    # justification to move something unconditionally this round, rather than
+                    # only checking after the fact whether its own text claimed one; (2) the
+                    # general "no free concession" safety net (Step 5), which - unlike the
+                    # older reciprocity-claim check - doesn't depend on the model's reply
+                    # narrating a reciprocity claim at all, so it also catches silently moving
+                    # something with no claim; (3) Prosocial's one-time first-concession
+                    # exception, right below. Cross-checks the classifier's "is_concession"
+                    # framing against the real payoff table, same as always: "sounds like a
+                    # concession" and "is actually favorable to the recruiter" are different
+                    # questions (e.g. an EARLIER start date reads like a concession but scores
+                    # WORSE for the recruiter). Also covers 'same' (acquiescing to the
+                    # recruiter's own current position isn't giving anything up either). Only
+                    # 'unknown' gets the benefit of the doubt (not counted as genuine, but not
+                    # ruled out either) since extraction can legitimately fail to match.
+                    genuine_concession_this_round = False
+                    genuine_concession_label = None
+                    genuine_concession_value = None
+                    round_concession_check = {
+                        'is_concession': False, 'requested_issue_id': None,
+                        'conceded_issue_id': None, 'conceded_new_value': None
+                    }
+                    if latest_user_message:
                         # Fill in RECRUITER_OPENING_OFFER for any issue prior_issue_statuses
                         # hasn't recorded yet (e.g. round 1, before any assistant_updates have
                         # been captured) so the classifier always sees the full current
@@ -1185,46 +1211,44 @@ def lucid():
                             dict(item, status=item.get('status') or RECRUITER_OPENING_OFFER.get(item['id'], ''))
                             for item in prior_issue_statuses
                         ]
-                        concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key, current_offer_for_classifier)
-                        # Don't just trust the classifier's "is_concession" framing - cross-
-                        # check the specific issue/value it says the candidate is giving
-                        # ground on against the real payoff table. "Sounds like a concession"
-                        # and "is actually favorable to the recruiter" are different questions
-                        # (e.g. an EARLIER start date reads like a concession but scores WORSE
-                        # for the recruiter on the real table - not a real concession at all).
-                        # Also covers 'same': accepting a value that's identical to the
-                        # recruiter's own current position isn't giving anything up either -
-                        # e.g. the candidate had asked for June 1 last round, then says "I can
-                        # take a later starting date" with no new value of their own - that's
-                        # just acquiescing to the recruiter's already-standing July 15, not a
-                        # fresh concession worth rewarding. Only 'unknown' gets the benefit of
-                        # the doubt, since the extraction can legitimately fail to match
-                        # (letter/date/city text is looser than plain numbers).
-                        if concession_check.get('is_concession'):
-                            conceded_issue_id = concession_check.get('conceded_issue_id')
-                            conceded_new_value = concession_check.get('conceded_new_value')
+                        round_concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key, current_offer_for_classifier)
+                        if round_concession_check.get('is_concession'):
+                            conceded_issue_id = round_concession_check.get('conceded_issue_id')
+                            conceded_new_value = round_concession_check.get('conceded_new_value')
                             if conceded_issue_id and conceded_new_value:
                                 prior_by_id_cc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
                                 conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or RECRUITER_OPENING_OFFER.get(conceded_issue_id)
                                 conceded_direction = _compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value)
-                                if conceded_direction in ('worse', 'same'):
-                                    print(f"[INFO /lucid] First-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession") # Vercel Log
-                                    concession_check['is_concession'] = False
-                                elif conceded_direction == 'unknown':
+                                if conceded_direction == 'better':
+                                    genuine_concession_this_round = True
+                                    genuine_concession_value = conceded_new_value
+                                    genuine_concession_label = next(
+                                        (item['label'] for item in _default_issue_statuses() if item['id'] == conceded_issue_id),
+                                        conceded_issue_id
+                                    )
+                                elif conceded_direction in ('worse', 'same'):
+                                    print(f"[INFO /lucid] Concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - not treated as genuine") # Vercel Log
+                                else:  # unknown
                                     unverified_trust_notes.append(
-                                        f"First-concession check (round {turn_number}): classifier said the candidate "
+                                        f"Concession check (round {turn_number}): classifier said the candidate "
                                         f"conceded {conceded_issue_id} -> '{conceded_new_value}', but that value "
-                                        f"couldn't be matched against the payoff table (unknown) - trusted the "
-                                        f"classifier's is_concession=true as-is."
+                                        f"couldn't be matched against the payoff table (unknown) - not counted as "
+                                        f"a confirmed genuine concession, but not ruled out either."
                                     )
                             else:
                                 unverified_trust_notes.append(
-                                    f"First-concession check (round {turn_number}): classifier said "
-                                    f"is_concession=true but didn't name a specific conceded issue/value to verify "
-                                    f"against the payoff table - trusted as-is."
+                                    f"Concession check (round {turn_number}): classifier said is_concession=true "
+                                    f"but didn't name a specific conceded issue/value to verify against the "
+                                    f"payoff table."
                                 )
-                        if concession_check.get('is_concession'):
-                            requested_issue_id = concession_check.get('requested_issue_id')
+
+                    # --- Prosocial-only: one-time "first concession" exception ---
+                    # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate
+                    # offers a GENUINE concession (per the check above), Prosocial rewards it
+                    # with a one-time trust-building gesture.
+                    if condition_key == 'prosocial' and not prosocial_first_concession_used and genuine_concession_this_round:
+                        if True:  # extra nesting kept only so the block below didn't need re-indenting
+                            requested_issue_id = round_concession_check.get('requested_issue_id')
                             in_hold_firm_window = turn_number <= HOLD_FIRM_ROUNDS
                             prosocial_first_concession_used = True  # consumed either way - see comment above
                             if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
@@ -1384,6 +1408,36 @@ def lucid():
                                 f"yet) - do so in this reply, even if the candidate hasn't "
                                 f"specifically asked for it."
                             )
+                    # General "no free concession" prescription (both conditions, every round) -
+                    # tells the model BEFORE it drafts a reply whether it has any justification to
+                    # move something unconditionally, using the genuine_concession_this_round
+                    # result computed above, rather than only catching an ungrounded move after
+                    # the fact (see the matching safety net in Step 5). Same "prescribe, don't just
+                    # describe" principle that fixed the concession-pacing schedule's reliability
+                    # earlier - prose alone ("never give for free") wasn't being followed
+                    # consistently; a concrete, round-specific verdict is. Skipped when the
+                    # first-concession exception is already granting something this round - that's
+                    # its own, separately-instructed exception and this note would contradict it.
+                    if not first_concession_note:
+                        if genuine_concession_this_round:
+                            round_note += (
+                                f" The candidate genuinely conceded on {genuine_concession_label} "
+                                f"this round (now at {genuine_concession_value}, verified against "
+                                f"your payoff schedule). Per your negotiation protocol, you may "
+                                f"reciprocate with a proportional move on AT MOST ONE other issue in "
+                                f"this reply - do not move anything beyond that without further "
+                                f"justification."
+                            )
+                        else:
+                            round_note += (
+                                " The candidate did NOT make a genuine concession this round (per "
+                                "your payoff schedule) - per your negotiation protocol, you may NOT "
+                                "move any issue unconditionally in this reply. You may still move "
+                                "Salary/Vacation Time if your concession schedule separately requires "
+                                "it this round (see above), and you may still propose a move "
+                                "CONDITIONALLY (asking for something specific in return), but do not "
+                                "agree to or grant anything outright."
+                            )
                     messages_for_api = messages + [{'role': 'system', 'content': round_note}]
                     if first_concession_note:
                         # Same ephemeral treatment as the round-number note above - fresh each call,
@@ -1507,6 +1561,67 @@ def lucid():
                                     else:
                                         print("[WARN /lucid] Pacing regeneration call failed - keeping original (under-conceded) reply") # Vercel Log
 
+                            # --- General "no free concession" safety net (both conditions,
+                            # every round) ---
+                            # Complements the reciprocity-claim safety net further below: that
+                            # one only catches the model LYING about reciprocating (explicitly
+                            # crediting a fake concession in its own reply text) - this one
+                            # catches the model just silently moving something with no claim at
+                            # all, by diffing the accumulated package against last round directly,
+                            # regardless of what the reply's prose says. Skipped when the first-
+                            # concession exception already governed this round's move (its own
+                            # safety net above handles that) and for Salary/Vacation moves the
+                            # pacing schedule itself mandates this round (the pacing safety net
+                            # above already governs those - only flags a move BEYOND what's
+                            # mandated).
+                            if not first_concession_note:
+                                accumulated_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                accumulated_by_id_fc = {item['id']: item.get('status', '') for item in accumulated_fc}
+                                prior_by_id_fc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                ungrounded_moves = []
+                                for item in _default_issue_statuses():
+                                    issue_id = item['id']
+                                    new_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    old_val = prior_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                                        continue  # didn't move in the candidate's favor
+                                    pacing_step = pacing_target.get(issue_id)
+                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                                        continue  # within what the pacing schedule itself mandates this round
+                                    if genuine_concession_this_round:
+                                        continue  # a real concession happened - some reciprocal movement is expected
+                                    ungrounded_moves.append((issue_id, item['label'], old_val))
+                                if ungrounded_moves:
+                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                                    print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
+                                    correction_note = (
+                                        f"[System note: the candidate did not make a genuine concession this "
+                                        f"round, but your previous draft reply moved {targets_desc} anyway. Per "
+                                        f"your negotiation protocol, never move an issue for free. Write your "
+                                        f"reply again: revert {targets_desc} in this reply. You may still "
+                                        f"propose a move conditionally, asking for something specific in "
+                                        f"return, but do not grant it outright.]"
+                                    )
+                                    retry_text = _call_openai_completion(
+                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        model, used_temperature, used_seed, openai_api_key
+                                    )
+                                    if retry_text:
+                                        generated_text = retry_text
+                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                        recheck_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                        recheck_by_id_fc = {item['id']: item.get('status', '') for item in recheck_fc}
+                                        still_ungrounded = [
+                                            label for issue_id, label, old_val in ungrounded_moves
+                                            if _compare_recruiter_value(
+                                                issue_id, recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id), old_val
+                                            ) == 'worse'
+                                        ]
+                                        if still_ungrounded:
+                                            print(f"[WARN /lucid] Ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again") # Vercel Log
+                                    else:
+                                        print("[WARN /lucid] No-free-concession regeneration call failed - keeping original reply") # Vercel Log
+
                             # --- First-concession grant safety net (Prosocial only, whenever
                             # the exception fired this round) ---
                             # Independent of the two checks above (this can fire any round,
@@ -1624,16 +1739,22 @@ def lucid():
                                             credited_issue_id
                                         )
                                         print(f"[WARN /lucid] Reciprocity claim invalid - {credited_issue_id}->{credited_value} is {credited_direction.upper()} (not better) for the recruiter, regenerating") # Vercel Log
+                                        # Name the EXACT value to revert to, rather than an abstract
+                                        # "don't treat that as a concession" - a concrete target is
+                                        # more likely to actually change the reply than a vague
+                                        # prohibition (observed in testing: vague corrections often
+                                        # came back with the reply byte-identical to the original).
                                         correction_note = (
                                             f"[System note: your previous draft reply credited the candidate with a "
                                             f"concession on {credited_label} ({credited_value}) and reciprocated based "
                                             f"on that - but per your payoff schedule, that value is NOT actually "
                                             f"favorable to you compared to your current position on {credited_label}, "
-                                            f"so it isn't a real concession. Write your reply again: do not treat that "
-                                            f"as a concession or reciprocate based on it. You may still make a move "
-                                            f"this reply if it's justified some other way (your own concession "
-                                            f"schedule, or a genuine concession the candidate made elsewhere), but "
-                                            f"not this one.]"
+                                            f"so it isn't a real concession. Write your reply again: revert "
+                                            f"{credited_label} back to exactly {credited_prior_value} in this reply, "
+                                            f"and do not reciprocate based on that claim. You may still make a move "
+                                            f"on a DIFFERENT issue this reply if it's justified some other way (your "
+                                            f"own concession schedule, or a genuine concession the candidate made "
+                                            f"elsewhere), but not on {credited_label}.]"
                                         )
                                         retry_text = _call_openai_completion(
                                             messages_for_api + [{'role': 'system', 'content': correction_note}],

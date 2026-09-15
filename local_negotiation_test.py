@@ -114,6 +114,61 @@ def main():
         # issue/value, not the model's own wording), printed as its own separate line below.
         first_concession_announcement = None
 
+        # --- Same general "genuine concession this round" check as lucid.py's /lucid
+        # endpoint (BOTH conditions, every round; computed BEFORE the round note so its
+        # result can be prescribed into that note below). Reused for: (1) the round_note
+        # prescription right after this, (2) the general "no free concession" safety net
+        # further down, (3) Prosocial's one-time first-concession exception. ---
+        genuine_concession_this_round = False
+        genuine_concession_label = None
+        genuine_concession_value = None
+        round_concession_check = {'is_concession': False, 'requested_issue_id': None,
+                                   'conceded_issue_id': None, 'conceded_new_value': None}
+        # Ground the classifier with the recruiter's full current package (falling back to
+        # RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate message
+        # like "I can take a later start date" gets extracted as the concrete value actually
+        # on the table, not a vague description the payoff check below can't match.
+        current_offer_for_classifier = [
+            dict(item, status=item['status'] or lucid.RECRUITER_OPENING_OFFER.get(item['id'], ''))
+            for item in current_statuses
+        ]
+        round_concession_check = lucid._detect_first_concession_llm(user_message, api_key, current_offer_for_classifier)
+        # Cross-check the classifier's framing against the real payoff table before trusting
+        # it - "sounds like a concession" isn't the same as "actually favorable to the
+        # recruiter" (e.g. an earlier start date reads like a concession but scores worse for
+        # the recruiter on the real table). Also covers 'same': accepting a value identical to
+        # the recruiter's own current position (e.g. "I can take a later starting date" with no
+        # new value of their own, when the recruiter's anchor never moved) is acquiescence, not
+        # a fresh concession.
+        if round_concession_check.get('is_concession'):
+            conceded_issue_id = round_concession_check.get('conceded_issue_id')
+            conceded_new_value = round_concession_check.get('conceded_new_value')
+            if conceded_issue_id and conceded_new_value:
+                prior_by_id_cc = {item['id']: item['status'] for item in current_statuses}
+                conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(conceded_issue_id)
+                conceded_direction = lucid._compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value)
+                if conceded_direction == 'better':
+                    genuine_concession_this_round = True
+                    genuine_concession_value = conceded_new_value
+                    genuine_concession_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == conceded_issue_id),
+                        conceded_issue_id
+                    )
+                elif conceded_direction in ('worse', 'same'):
+                    print(f"  [concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - not treated as genuine]")
+                else:  # unknown
+                    unverified_trust_notes.append(
+                        f"Concession check: classifier said the candidate conceded "
+                        f"{conceded_issue_id} -> '{conceded_new_value}', but that value couldn't be "
+                        f"matched against the payoff table (unknown) - not counted as a confirmed "
+                        f"genuine concession, but not ruled out either."
+                    )
+            else:
+                unverified_trust_notes.append(
+                    "Concession check: classifier said is_concession=true but didn't name a "
+                    "specific conceded issue/value to verify against the payoff table."
+                )
+
         # --- Same ephemeral round-number note as lucid.py's /lucid endpoint (strengthened
         # during the hold-firm window, rounds 1-HOLD_FIRM_ROUNDS) ---
         if turn_number <= lucid.HOLD_FIRM_ROUNDS:
@@ -155,55 +210,44 @@ def main():
                     f"moved {' and '.join(still_needed)} (you have not reached this yet) - do "
                     f"so in this reply, even if the candidate hasn't specifically asked for it."
                 )
+        # Same general "no free concession" prescription as lucid.py's /lucid endpoint (both
+        # conditions, every round) - tells the model BEFORE it drafts a reply whether it has
+        # any justification to move something unconditionally, using the
+        # genuine_concession_this_round result computed above. Skipped when the first-
+        # concession exception is about to grant something this round (computed here, before
+        # that block runs, using the same trigger condition it uses) - that's its own,
+        # separately-instructed exception and this note would contradict it.
+        first_concession_will_fire = (
+            condition_key == 'prosocial' and not first_concession_used and genuine_concession_this_round
+        )
+        if not first_concession_will_fire:
+            if genuine_concession_this_round:
+                round_note += (
+                    f" The candidate genuinely conceded on {genuine_concession_label} this round "
+                    f"(now at {genuine_concession_value}, verified against your payoff schedule). "
+                    f"Per your negotiation protocol, you may reciprocate with a proportional move "
+                    f"on AT MOST ONE other issue in this reply - do not move anything beyond that "
+                    f"without further justification."
+                )
+            else:
+                round_note += (
+                    " The candidate did NOT make a genuine concession this round (per your "
+                    "payoff schedule) - per your negotiation protocol, you may NOT move any issue "
+                    "unconditionally in this reply. You may still move Salary/Vacation Time if "
+                    "your concession schedule separately requires it this round (see above), and "
+                    "you may still propose a move CONDITIONALLY (asking for something specific in "
+                    "return), but do not agree to or grant anything outright."
+                )
         messages_for_api = messages + [{'role': 'system', 'content': round_note}]
 
         # --- Same Prosocial-only first-concession exception as lucid.py's /lucid endpoint.
-        # Trigger (any concession) and grant (never Salary/Vacation) are decoupled: the
-        # exception consumes on ANY detected concession, but if the candidate specifically
+        # Trigger (a genuine concession) and grant (never Salary/Vacation) are decoupled: the
+        # exception consumes on any genuine concession, but if the candidate specifically
         # asked for Salary/Vacation, the model is told to grant a different issue instead. ---
         first_concession_target_issue = None
-        if condition_key == 'prosocial' and not first_concession_used:
-            # Ground the classifier with the recruiter's full current package (falling back
-            # to RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate
-            # message like "I can take a later start date" gets extracted as the concrete
-            # value actually on the table, not a vague description the payoff check below
-            # can't match.
-            current_offer_for_classifier = [
-                dict(item, status=item['status'] or lucid.RECRUITER_OPENING_OFFER.get(item['id'], ''))
-                for item in current_statuses
-            ]
-            check = lucid._detect_first_concession_llm(user_message, api_key, current_offer_for_classifier)
-            # Cross-check the classifier's framing against the real payoff table before
-            # trusting it - "sounds like a concession" isn't the same as "actually favorable
-            # to the recruiter" (e.g. an earlier start date reads like a concession but
-            # scores worse for the recruiter on the real table). Also covers 'same':
-            # accepting a value identical to the recruiter's own current position (e.g.
-            # "I can take a later starting date" with no new value of their own, when the
-            # recruiter's anchor never moved) is acquiescence, not a fresh concession.
-            if check.get('is_concession'):
-                conceded_issue_id = check.get('conceded_issue_id')
-                conceded_new_value = check.get('conceded_new_value')
-                if conceded_issue_id and conceded_new_value:
-                    prior_by_id_cc = {item['id']: item['status'] for item in current_statuses}
-                    conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(conceded_issue_id)
-                    conceded_direction = lucid._compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value)
-                    if conceded_direction in ('worse', 'same'):
-                        print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession]")
-                        check['is_concession'] = False
-                    elif conceded_direction == 'unknown':
-                        unverified_trust_notes.append(
-                            f"First-concession check: classifier said the candidate conceded "
-                            f"{conceded_issue_id} -> '{conceded_new_value}', but that value couldn't be "
-                            f"matched against the payoff table (unknown) - trusted the classifier's "
-                            f"is_concession=true as-is."
-                        )
-                else:
-                    unverified_trust_notes.append(
-                        "First-concession check: classifier said is_concession=true but didn't name a "
-                        "specific conceded issue/value to verify against the payoff table - trusted as-is."
-                    )
-            if check.get('is_concession'):
-                requested_issue_id = check.get('requested_issue_id')
+        if first_concession_will_fire:
+            if True:  # extra nesting kept only so the block below didn't need re-indenting
+                requested_issue_id = round_concession_check.get('requested_issue_id')
                 in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
                 first_concession_used = True  # consumed either way
                 if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
@@ -350,6 +394,62 @@ def main():
                 else:
                     print("  [regeneration call failed - keeping original (under-conceded) reply]")
 
+        # --- Same general "no free concession" safety net as lucid.py's /lucid endpoint
+        # (both conditions, every round). Complements the reciprocity-claim safety net
+        # further down: that one only catches the model LYING about reciprocating
+        # (explicitly crediting a fake concession in its own reply text) - this one catches
+        # the model just silently moving something with no claim at all, by diffing the
+        # accumulated package against last round directly. Skipped when the first-concession
+        # exception already governed this round's move, and for Salary/Vacation moves the
+        # pacing schedule itself mandates this round. ---
+        if not first_concession_will_fire:
+            accumulated_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
+            accumulated_by_id_fc = {item['id']: item['status'] for item in accumulated_fc}
+            prior_by_id_fc = {item['id']: item['status'] for item in current_statuses}
+            ungrounded_moves = []
+            for item in lucid._default_issue_statuses():
+                issue_id = item['id']
+                new_val = accumulated_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                old_val = prior_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                    continue  # didn't move in the candidate's favor
+                pacing_step = pacing_target.get(issue_id)
+                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                    continue  # within what the pacing schedule itself mandates this round
+                if genuine_concession_this_round:
+                    continue  # a real concession happened - some reciprocal movement is expected
+                ungrounded_moves.append((issue_id, item['label'], old_val))
+            if ungrounded_moves:
+                targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating]")
+                correction_note = (
+                    f"[System note: the candidate did not make a genuine concession this round, "
+                    f"but your previous draft reply moved {targets_desc} anyway. Per your "
+                    f"negotiation protocol, never move an issue for free. Write your reply again: "
+                    f"revert {targets_desc} in this reply. You may still propose a move "
+                    f"conditionally, asking for something specific in return, but do not grant it "
+                    f"outright.]"
+                )
+                retry_text = lucid._call_openai_completion(
+                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    model, temperature, None, api_key
+                )
+                if retry_text:
+                    reply = retry_text
+                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                    recheck_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
+                    recheck_by_id_fc = {item['id']: item['status'] for item in recheck_fc}
+                    still_ungrounded = [
+                        label for issue_id, label, old_val in ungrounded_moves
+                        if lucid._compare_recruiter_value(
+                            issue_id, recheck_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id), old_val
+                        ) == 'worse'
+                    ]
+                    if still_ungrounded:
+                        print(f"  [ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again]")
+                else:
+                    print("  [no-free-concession regeneration call failed - keeping original reply]")
+
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
@@ -438,15 +538,19 @@ def main():
                         credited_issue_id
                     )
                     print(f"  [reciprocity claim invalid - {credited_issue_id}->{credited_value} is {credited_direction.upper()} (not better) for the recruiter, regenerating]")
+                    # Name the EXACT value to revert to, rather than an abstract "don't treat
+                    # that as a concession" - a concrete target is more likely to actually
+                    # change the reply than a vague prohibition.
                     correction_note = (
                         f"[System note: your previous draft reply credited the candidate with a "
                         f"concession on {credited_label} ({credited_value}) and reciprocated based on "
                         f"that - but per your payoff schedule, that value is NOT actually favorable to "
                         f"you compared to your current position on {credited_label}, so it isn't a real "
-                        f"concession. Write your reply again: do not treat that as a concession or "
-                        f"reciprocate based on it. You may still make a move this reply if it's "
+                        f"concession. Write your reply again: revert {credited_label} back to exactly "
+                        f"{credited_prior_value} in this reply, and do not reciprocate based on that "
+                        f"claim. You may still make a move on a DIFFERENT issue this reply if it's "
                         f"justified some other way (your own concession schedule, or a genuine "
-                        f"concession the candidate made elsewhere), but not this one.]"
+                        f"concession the candidate made elsewhere), but not on {credited_label}.]"
                     )
                     retry_text = lucid._call_openai_completion(
                         messages_for_api + [{'role': 'system', 'content': correction_note}],
