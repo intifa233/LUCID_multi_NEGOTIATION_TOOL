@@ -185,7 +185,7 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
         return {}
 
 
-def _detect_first_concession_llm(user_message, openai_api_key):
+def _detect_first_concession_llm(user_message, openai_api_key, current_offer_statuses=None):
     """
     Used only for the Prosocial condition's one-time "first concession" exception
     (see prompts.yaml [NEGOTIATION PROTOCOL]): judges whether the candidate's latest
@@ -206,6 +206,17 @@ def _detect_first_concession_llm(user_message, openai_api_key):
     questions (e.g. a candidate offering an EARLIER start date reads like a concession but
     scores WORSE for the recruiter on the real payoff table - not a real concession at all).
 
+    current_offer_statuses (optional, the recruiter's current 8-issue package - same shape
+    as _default_issue_statuses()) is given to the classifier as grounding context. Without
+    it, a candidate message like "I can take a later start date" (agreeing to accept
+    whatever's already on the table, without naming a value of their own) gets extracted as
+    a vague conceded_new_value like "a later date" - which RECRUITER_PAYOFF_TABLE can't
+    match, so the caller's payoff cross-check can neither confirm nor deny it and defaults
+    to trusting the classification (benefit of the doubt). Grounded with the current offer,
+    the classifier can instead report the concrete value actually on the table (e.g. "July
+    15"), so the caller's 'same' check (see _compare_recruiter_value) can correctly catch
+    that this is acquiescence, not a fresh concession.
+
     Returns {'is_concession': False, 'requested_issue_id': None, 'conceded_issue_id': None,
     'conceded_new_value': None} on any failure, or if no message/key was given, so this
     never blocks the main call.
@@ -219,6 +230,23 @@ def _detect_first_concession_llm(user_message, openai_api_key):
 
     defaults = _default_issue_statuses()
     valid_issue_ids = {item['id'] for item in defaults}
+
+    current_offer_note = ""
+    if current_offer_statuses:
+        lines = [
+            f"{item['label']} ({item['id']}): {item['status']}"
+            for item in current_offer_statuses if item.get('status')
+        ]
+        if lines:
+            current_offer_note = (
+                "\nThe recruiter's CURRENT offer on file (for grounding only) is:\n"
+                + "\n".join(lines)
+                + "\nIf the candidate does not name a specific new value of their own on an "
+                "issue but is simply agreeing to accept what's already listed above for that "
+                "issue, set conceded_new_value to that SAME listed value (not a vague "
+                "description like 'a later date' or 'more flexible') - accepting the status "
+                "quo is not a fresh concession, and the exact value is needed to verify that."
+            )
 
     system_prompt = (
         "You analyze one message from a job candidate in a negotiation. Determine whether "
@@ -238,6 +266,7 @@ def _detect_first_concession_llm(user_message, openai_api_key):
         "on: the issue, and the specific concrete new value they're now offering on it (e.g. "
         "'July 1', 'Division C', '80%') - not a description. Use null for both if "
         "is_concession is false or this is unclear."
+        + current_offer_note
     )
 
     payload = {
@@ -1106,7 +1135,15 @@ def lucid():
                     # alternate issue" cases, where the model has a free choice.
                     first_concession_target_issue = None
                     if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
-                        concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key)
+                        # Fill in RECRUITER_OPENING_OFFER for any issue prior_issue_statuses
+                        # hasn't recorded yet (e.g. round 1, before any assistant_updates have
+                        # been captured) so the classifier always sees the full current
+                        # package, not a partially-blank one.
+                        current_offer_for_classifier = [
+                            dict(item, status=item.get('status') or RECRUITER_OPENING_OFFER.get(item['id'], ''))
+                            for item in prior_issue_statuses
+                        ]
+                        concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key, current_offer_for_classifier)
                         # Don't just trust the classifier's "is_concession" framing - cross-
                         # check the specific issue/value it says the candidate is giving
                         # ground on against the real payoff table. "Sounds like a concession"

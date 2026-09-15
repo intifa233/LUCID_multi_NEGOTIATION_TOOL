@@ -155,7 +155,16 @@ def main():
         # asked for Salary/Vacation, the model is told to grant a different issue instead. ---
         first_concession_target_issue = None
         if condition_key == 'prosocial' and not first_concession_used:
-            check = lucid._detect_first_concession_llm(user_message, api_key)
+            # Ground the classifier with the recruiter's full current package (falling back
+            # to RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate
+            # message like "I can take a later start date" gets extracted as the concrete
+            # value actually on the table, not a vague description the payoff check below
+            # can't match.
+            current_offer_for_classifier = [
+                dict(item, status=item['status'] or lucid.RECRUITER_OPENING_OFFER.get(item['id'], ''))
+                for item in current_statuses
+            ]
+            check = lucid._detect_first_concession_llm(user_message, api_key, current_offer_for_classifier)
             # Cross-check the classifier's framing against the real payoff table before
             # trusting it - "sounds like a concession" isn't the same as "actually favorable
             # to the recruiter" (e.g. an earlier start date reads like a concession but
