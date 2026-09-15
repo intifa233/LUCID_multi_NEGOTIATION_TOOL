@@ -503,7 +503,20 @@ def _lookup_recruiter_points(issue_id, raw_value):
         return best_pts
 
     if table['kind'] == 'letter':
-        m = re.search(r'\b([A-E])\b', text.upper())
+        upper_text = text.upper()
+        # Require the label word itself (Division/Plan) right before the letter - a bare
+        # \b([A-E])\b would also match an ordinary English word that happens to be a single
+        # A-E letter, most commonly the article "a" (e.g. "a nicer plan" would otherwise
+        # false-positive-match "Plan A"). The extraction prompt always preserves this format
+        # (e.g. "Division A", "Plan E"), so requiring it doesn't lose real matches.
+        m = re.search(r'\b(?:DIVISION|PLAN)\s+([A-E])\b', upper_text)
+        if not m:
+            # Fall back to a bare letter only when the ENTIRE extracted value reduces to
+            # just that letter (e.g. extraction returned "C" on its own, no prefix) - safe
+            # because it then can't coincidentally be an ordinary word in a longer sentence.
+            stripped = upper_text.strip()
+            if stripped in ('A', 'B', 'C', 'D', 'E'):
+                m = re.match(r'([A-E])$', stripped)
         if not m:
             return None
         letter = m.group(1)
