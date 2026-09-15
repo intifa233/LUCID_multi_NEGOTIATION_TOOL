@@ -108,7 +108,11 @@ def main():
         # Collects every "couldn't verify via payoff table, trusted the LLM's own judgment"
         # edge case this round - printed as its own separate block below, apart from Alex's
         # reply, so these unverified cases are easy to spot while testing.
-        benefit_of_doubt_notes = []
+        unverified_trust_notes = []
+        # Set only when the first-concession grant safety net confirms a grant actually
+        # happened this round - a deterministic announcement (built from the confirmed
+        # issue/value, not the model's own wording), printed as its own separate line below.
+        first_concession_announcement = None
 
         # --- Same ephemeral round-number note as lucid.py's /lucid endpoint (strengthened
         # during the hold-firm window, rounds 1-HOLD_FIRM_ROUNDS) ---
@@ -187,14 +191,14 @@ def main():
                         print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession]")
                         check['is_concession'] = False
                     elif conceded_direction == 'unknown':
-                        benefit_of_doubt_notes.append(
+                        unverified_trust_notes.append(
                             f"First-concession check: classifier said the candidate conceded "
                             f"{conceded_issue_id} -> '{conceded_new_value}', but that value couldn't be "
                             f"matched against the payoff table (unknown) - trusted the classifier's "
                             f"is_concession=true as-is."
                         )
                 else:
-                    benefit_of_doubt_notes.append(
+                    unverified_trust_notes.append(
                         "First-concession check: classifier said is_concession=true but didn't name a "
                         "specific conceded issue/value to verify against the payoff table - trusted as-is."
                     )
@@ -265,6 +269,16 @@ def main():
                         f"schedule separately - this one-time gift is on a different issue.]"
                     )
                     print("  [first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)]")
+                # A separate, deterministic message announcing exactly what got granted will
+                # be printed on its own line below, once the grant is confirmed - so tell the
+                # model not to write its own prose announcing the specific gift.
+                note += (
+                    " A separate message announcing this exact gift will be shown to the "
+                    "candidate automatically, right before this reply - so do NOT write your "
+                    "own sentence announcing or explaining this specific gift in your reply "
+                    "text. Still include the correct value in your \"Current package:\" recap "
+                    "as usual, and continue the rest of your reply normally."
+                )
                 messages_for_api.append({'role': 'system', 'content': note})
                 first_concession_note_fired = True
             else:
@@ -339,11 +353,11 @@ def main():
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
-            grant_status, grant_info, grant_doubt_note = lucid._first_concession_grant_status(
+            grant_status, grant_info, grant_unverified_note = lucid._first_concession_grant_status(
                 current_statuses, assistant_updates, first_concession_target_issue
             )
-            if grant_doubt_note:
-                benefit_of_doubt_notes.append(grant_doubt_note)
+            if grant_unverified_note:
+                unverified_trust_notes.append(grant_unverified_note)
             if grant_status != 'ok':
                 if grant_status == 'overshoot':
                     overshoot_issue_id, cap_value = grant_info or (None, None)
@@ -381,15 +395,31 @@ def main():
                 if retry_text:
                     reply = retry_text
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                    recheck_status, _, recheck_doubt_note = lucid._first_concession_grant_status(
+                    recheck_status, recheck_info, recheck_unverified_note = lucid._first_concession_grant_status(
                         current_statuses, assistant_updates, first_concession_target_issue
                     )
-                    if recheck_doubt_note:
-                        benefit_of_doubt_notes.append(recheck_doubt_note)
+                    if recheck_unverified_note:
+                        unverified_trust_notes.append(recheck_unverified_note)
                     if recheck_status != 'ok':
                         print(f"  [first-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again]")
+                    else:
+                        grant_status, grant_info = recheck_status, recheck_info
                 else:
                     print("  [first-concession regeneration call failed - keeping original reply]")
+
+            # grant_status/grant_info now reflect the FINAL state - build the deterministic
+            # announcement only when a specific issue/value was actually confirmed granted.
+            if grant_status == 'ok' and grant_info:
+                granted_issue_id, granted_value = grant_info
+                granted_label = next(
+                    (item['label'] for item in lucid._default_issue_statuses() if item['id'] == granted_issue_id),
+                    granted_issue_id
+                )
+                first_concession_announcement = (
+                    f"Thanks for your concession — as a reciprocal gesture, I'd like to give you "
+                    f"a free move on {granted_label}: {granted_value}, no need to give anything "
+                    f"in return."
+                )
 
         # --- Same reciprocity-claim safety net as lucid.py's /lucid endpoint: every round,
         # both conditions - verify any "since you offered X, I'll reciprocate" claim against
@@ -438,25 +468,29 @@ def main():
                     else:
                         print("  [reciprocity-claim regeneration call failed - keeping original reply]")
                 elif credited_direction == 'unknown':
-                    benefit_of_doubt_notes.append(
+                    unverified_trust_notes.append(
                         f"Reciprocity claim: reply credited the candidate with {credited_issue_id} -> "
                         f"'{credited_value}', but that value couldn't be matched against the payoff "
                         f"table (unknown) - allowed the reciprocal grant to stand."
                     )
             else:
-                benefit_of_doubt_notes.append(
+                unverified_trust_notes.append(
                     "Reciprocity claim: reply claimed reciprocity but didn't credit a specific "
                     "issue/value to verify - allowed to stand."
                 )
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
+        # Printed as its own separate line, before the main reply, mirroring the two-bubble
+        # split the real Qualtrics frontend renders - not folded into "Alex: ...".
+        if first_concession_announcement:
+            print(f"\nAlex (gift, round {turn_number}): {first_concession_announcement}")
         print(f"\nAlex (round {turn_number}): {reply}\n")
         # Printed as its own separate block, apart from Alex's reply, per request - so any
-        # unverified "benefit of the doubt" edge case is easy to spot while testing.
-        if benefit_of_doubt_notes:
-            print(f"--- benefit of the doubt (round {turn_number}) ---")
-            for note in benefit_of_doubt_notes:
+        # unverified-trust edge case is easy to spot while testing.
+        if unverified_trust_notes:
+            print(f"--- unverified trust (round {turn_number}) ---")
+            for note in unverified_trust_notes:
                 print(f"  * {note}")
             print("---")
 

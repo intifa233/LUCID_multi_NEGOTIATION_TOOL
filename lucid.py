@@ -212,7 +212,7 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     whatever's already on the table, without naming a value of their own) gets extracted as
     a vague conceded_new_value like "a later date" - which RECRUITER_PAYOFF_TABLE can't
     match, so the caller's payoff cross-check can neither confirm nor deny it and defaults
-    to trusting the classification (benefit of the doubt). Grounded with the current offer,
+    to trusting the classification as unverified. Grounded with the current offer,
     the classifier can instead report the concrete value actually on the table (e.g. "July
     15"), so the caller's 'same' check (see _compare_recruiter_value) can correctly catch
     that this is acquiescence, not a fresh concession.
@@ -589,23 +589,27 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
     counts (the model was told exactly which one to grant); otherwise any of the six non-
     Salary/Vacation issues counts (the model had a free choice among them).
 
-    Returns a 3-tuple (status, info, doubt_note):
-      ('ok', None, None)                  - some eligible issue was CONFIRMED to move exactly
-                                             one level in the candidate's favor
-      ('ok', None, "<reason>")            - allowed to stand, but nothing could be verified
-                                             either way (benefit of the doubt - letter/date/
-                                             city matching can legitimately fail to resolve);
-                                             doubt_note is a short human-readable reason,
-                                             surfaced separately by the caller rather than
-                                             silently treated the same as a confirmed 'ok'
-      ('overshoot', (issue_id, cap), None) - an eligible issue moved, but past its one-level cap
-      ('missing', None, None)             - nothing eligible moved at all
+    Returns a 3-tuple (status, info, unverified_note):
+      ('ok', (issue_id, value), None)       - some eligible issue was CONFIRMED to move exactly
+                                               one level in the candidate's favor; info names
+                                               exactly what was granted (used by the caller to
+                                               build a deterministic grant announcement)
+      ('ok', (issue_id, value), "<reason>") - allowed to stand, but that direction couldn't be
+                                               verified either way (letter/date/city matching can
+                                               legitimately fail to resolve); info still names the
+                                               issue/value that was present, so a grant
+                                               announcement can still be built - unverified_note
+                                               is a short human-readable reason, surfaced
+                                               separately by the caller rather than silently
+                                               treated the same as a confirmed match
+      ('overshoot', (issue_id, cap), None)  - an eligible issue moved, but past its one-level cap
+      ('missing', None, None)               - nothing eligible moved at all
     """
     prior_by_id = {item['id']: item.get('status', '') for item in prior_statuses}
     candidate_ids = [target_issue_id] if target_issue_id else [
         item['id'] for item in _default_issue_statuses() if item['id'] not in ('issue-3', 'issue-7')
     ]
-    saw_unknown = False
+    unknown_match = None
     overshoot = None
     for issue_id in candidate_ids:
         if issue_id not in assistant_updates:
@@ -617,16 +621,16 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
             if cap_value is not None and _compare_recruiter_value(issue_id, assistant_updates[issue_id], cap_value) == 'worse':
                 overshoot = (issue_id, cap_value)  # moved further than the one-level cap allows
                 continue
-            return ('ok', None, None)
+            return ('ok', (issue_id, assistant_updates[issue_id]), None)
         if direction == 'unknown':
-            saw_unknown = True
-    if saw_unknown:
-        doubt_note = (
+            unknown_match = (issue_id, assistant_updates[issue_id])
+    if unknown_match:
+        unverified_note = (
             f"First-concession grant check (target={target_issue_id or 'any of the 6 alternates'}): "
-            f"could not verify any eligible issue's new value against the payoff table (unknown) - "
-            f"allowed the grant to stand without confirming the one-level cap was honored."
+            f"could not verify {unknown_match[0]} -> '{unknown_match[1]}' against the payoff table "
+            f"(unknown) - allowed the grant to stand without confirming the one-level cap was honored."
         )
-        return ('ok', None, doubt_note)
+        return ('ok', unknown_match, unverified_note)
     if overshoot:
         return ('overshoot', overshoot, None)
     return ('missing', None, None)
@@ -1145,13 +1149,20 @@ def lucid():
                     first_concession_target_issue = None
                     # Collects every place this round where a payoff-table check couldn't
                     # confirm or deny something and fell back to trusting an LLM's own
-                    # judgment ("benefit of the doubt") - the first-concession cross-check,
-                    # the reciprocity-claim safety net, and the one-level-cap grant check.
+                    # judgment as unverified - the first-concession cross-check, the
+                    # reciprocity-claim safety net, and the one-level-cap grant check.
                     # Returned to the frontend as its own field (never folded into
                     # generated_text, so it's invisible in the chat itself) so these
                     # unverified edge cases can be surfaced/audited separately from the
                     # negotiation reply proper.
-                    benefit_of_doubt_notes = []
+                    unverified_trust_notes = []
+                    # Set only when the first-concession safety net (Step 5) CONFIRMS a grant
+                    # actually happened this round - a short, deterministic announcement of
+                    # exactly what was granted, shown to the candidate as its own separate chat
+                    # bubble by the frontend, per request (see response_data below). Stays None
+                    # otherwise, including when the exception fired but the grant never got
+                    # confirmed (still missing/overshooting after the retry).
+                    first_concession_announcement = None
                     if condition_key == 'prosocial' and not prosocial_first_concession_used and latest_user_message:
                         # Fill in RECRUITER_OPENING_OFFER for any issue prior_issue_statuses
                         # hasn't recorded yet (e.g. round 1, before any assistant_updates have
@@ -1187,14 +1198,14 @@ def lucid():
                                     print(f"[INFO /lucid] First-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession") # Vercel Log
                                     concession_check['is_concession'] = False
                                 elif conceded_direction == 'unknown':
-                                    benefit_of_doubt_notes.append(
+                                    unverified_trust_notes.append(
                                         f"First-concession check (round {turn_number}): classifier said the candidate "
                                         f"conceded {conceded_issue_id} -> '{conceded_new_value}', but that value "
                                         f"couldn't be matched against the payoff table (unknown) - trusted the "
                                         f"classifier's is_concession=true as-is."
                                     )
                             else:
-                                benefit_of_doubt_notes.append(
+                                unverified_trust_notes.append(
                                     f"First-concession check (round {turn_number}): classifier said "
                                     f"is_concession=true but didn't name a specific conceded issue/value to verify "
                                     f"against the payoff table - trusted as-is."
@@ -1279,6 +1290,25 @@ def lucid():
                                     f"schedule separately - this one-time gift is on a different issue.]"
                                 )
                                 print("[INFO /lucid] Prosocial first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)") # Vercel Log
+                            if first_concession_note:
+                                # A separate, deterministic message announcing exactly what got
+                                # granted (built from the real payoff table, not the model's own
+                                # wording - see Step 5 below) will be shown to the candidate as
+                                # its own chat bubble, right before this reply. Tell the model
+                                # not to write its own prose announcing/explaining the specific
+                                # gift, so the two don't say the same thing twice - it should
+                                # still reflect the correct value in its "Current package:"
+                                # recap (that's a different, required part of every reply) and
+                                # otherwise continue the rest of the negotiation normally.
+                                first_concession_note += (
+                                    " A separate message announcing this exact gift will be shown "
+                                    "to the candidate automatically, right before this reply - so "
+                                    "do NOT write your own sentence announcing or explaining this "
+                                    "specific gift in your reply text (e.g. don't say things like "
+                                    "'I'll give you a free bump on X'). Still include the correct "
+                                    "value in your \"Current package:\" recap as usual, and "
+                                    "continue the rest of your reply normally."
+                                )
 
                     # --- Step 4: Call OpenAI API ---
                     openai_url = 'https://api.openai.com/v1/chat/completions'
@@ -1473,11 +1503,11 @@ def lucid():
                             # more than that - using the real payoff table rather than
                             # trusting the model followed through.
                             if first_concession_note:
-                                grant_status, grant_info, grant_doubt_note = _first_concession_grant_status(
+                                grant_status, grant_info, grant_unverified_note = _first_concession_grant_status(
                                     prior_issue_statuses, assistant_updates, first_concession_target_issue
                                 )
-                                if grant_doubt_note:
-                                    benefit_of_doubt_notes.append(grant_doubt_note)
+                                if grant_unverified_note:
+                                    unverified_trust_notes.append(grant_unverified_note)
                                 if grant_status != 'ok':
                                     if grant_status == 'overshoot':
                                         overshoot_issue_id, cap_value = grant_info or (None, None)
@@ -1515,15 +1545,41 @@ def lucid():
                                     if retry_text:
                                         generated_text = retry_text
                                         assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-                                        recheck_status, _, recheck_doubt_note = _first_concession_grant_status(
+                                        recheck_status, recheck_info, recheck_unverified_note = _first_concession_grant_status(
                                             prior_issue_statuses, assistant_updates, first_concession_target_issue
                                         )
-                                        if recheck_doubt_note:
-                                            benefit_of_doubt_notes.append(recheck_doubt_note)
+                                        if recheck_unverified_note:
+                                            unverified_trust_notes.append(recheck_unverified_note)
                                         if recheck_status != 'ok':
                                             print(f"[WARN /lucid] First-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again") # Vercel Log
+                                        else:
+                                            # Regeneration fixed it - use the post-regen result
+                                            # below to build the grant announcement, not the
+                                            # original (non-compliant) attempt.
+                                            grant_status, grant_info = recheck_status, recheck_info
                                     else:
                                         print("[WARN /lucid] First-concession regeneration call failed - keeping original reply") # Vercel Log
+
+                                # grant_status/grant_info now reflect the FINAL state (either the
+                                # first check, if it was already compliant, or the post-regen
+                                # recheck above). Only build an announcement when a specific
+                                # issue/value was actually confirmed granted - never invent one
+                                # for a still-missing/overshooting grant.
+                                if grant_status == 'ok' and grant_info:
+                                    granted_issue_id, granted_value = grant_info
+                                    granted_label = next(
+                                        (item['label'] for item in _default_issue_statuses() if item['id'] == granted_issue_id),
+                                        granted_issue_id
+                                    )
+                                    # Built entirely from known facts (the confirmed issue/value),
+                                    # not the model's own phrasing - shown to the candidate as its
+                                    # own separate chat bubble by the frontend (see
+                                    # response_data below), per request.
+                                    first_concession_announcement = (
+                                        f"Thanks for your concession — as a reciprocal gesture, I'd "
+                                        f"like to give you a free move on {granted_label}: "
+                                        f"{granted_value}, no need to give anything in return."
+                                    )
 
                             # --- Reciprocity-claim safety net (every round, both conditions) ---
                             # The checks above only cover the one-time first-concession moment
@@ -1586,14 +1642,14 @@ def lucid():
                                         else:
                                             print("[WARN /lucid] Reciprocity-claim regeneration call failed - keeping original reply") # Vercel Log
                                     elif credited_direction == 'unknown':
-                                        benefit_of_doubt_notes.append(
+                                        unverified_trust_notes.append(
                                             f"Reciprocity claim (round {turn_number}): reply credited the candidate "
                                             f"with {credited_issue_id} -> '{credited_value}', but that value couldn't "
                                             f"be matched against the payoff table (unknown) - allowed the reciprocal "
                                             f"grant to stand."
                                         )
                                 else:
-                                    benefit_of_doubt_notes.append(
+                                    unverified_trust_notes.append(
                                         f"Reciprocity claim (round {turn_number}): reply claimed reciprocity but "
                                         f"didn't credit a specific issue/value to verify - allowed to stand."
                                     )
@@ -1607,12 +1663,18 @@ def lucid():
                                 # it and send it back next round - see the first-concession block above.
                                 'prosocial_first_concession_used': prosocial_first_concession_used,
                                 # Every "couldn't verify via payoff table, trusted the LLM's own
-                                # judgment" edge case this round (see benefit_of_doubt_notes above) -
+                                # judgment" edge case this round (see unverified_trust_notes above) -
                                 # always present, empty list when none fired this round. Kept
                                 # completely separate from generated_text so the frontend can log it
                                 # (e.g. into its own Embedded Data field) without ever rendering it
                                 # into the visible chat transcript.
-                                'benefit_of_doubt_notes': benefit_of_doubt_notes
+                                'unverified_trust_notes': unverified_trust_notes,
+                                # Only set when the first-concession safety net confirmed a grant
+                                # actually happened this round (see above) - a short, deterministic
+                                # announcement of exactly what was granted, meant to be shown as
+                                # its own separate chat bubble, before generated_text, rather than
+                                # folded into it.
+                                'first_concession_announcement': first_concession_announcement
                             }
                             # --- Multi-issue offer tracking (per-round, both speakers) ---
                             # The frontend echoes back the last snapshot it persisted (body['issue_statuses'])
