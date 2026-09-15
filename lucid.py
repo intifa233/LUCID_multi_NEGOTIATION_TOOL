@@ -660,6 +660,16 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
 PROSELF_CONCESSION_ROUND = 9  # proself's schedule: "only in rounds 9-10" (or genuine walkaway risk, not modeled here)
 PACING_STEP = {'issue-7': '$86,000', 'issue-3': '15 days'}  # the mandated step for both conditions' first move
 
+# Prosocial's schedule describes a SECOND, conditional step beyond PACING_STEP: "...then
+# toward $88,000 by round 8-9 if the candidate is engaging constructively... and to 20 days
+# if it's needed in round 8-10" - this is prosocial's own hard limit (see prompts.yaml
+# CRITICAL RULES 4), offered as available rather than required, and only when earned. Proself
+# has no equivalent: its hard limit ($86,000/15 days) already equals PACING_STEP, so there's
+# nothing further to stretch toward - "do not go further even under pressure" is explicit in
+# its own schedule. Keep in sync with prompts.yaml if either schedule changes.
+PROSOCIAL_STRETCH_ROUND = 8
+PROSOCIAL_STRETCH_STEP = {'issue-7': '$88,000', 'issue-3': '20 days'}
+
 
 def _pacing_target(condition_key, turn_number):
     """
@@ -671,6 +681,21 @@ def _pacing_target(condition_key, turn_number):
         return dict(PACING_STEP)
     if condition_key == 'proself' and turn_number >= PROSELF_CONCESSION_ROUND:
         return dict(PACING_STEP)
+    return {'issue-7': None, 'issue-3': None}
+
+
+def _pacing_stretch_target(condition_key, turn_number):
+    """
+    Returns {'issue-7': target_or_None, 'issue-3': target_or_None} - prosocial's OPTIONAL
+    deeper step (PROSOCIAL_STRETCH_STEP), available from PROSOCIAL_STRETCH_ROUND onward.
+    Unlike _pacing_target, this is never mandatory - the caller only offers it to the model
+    when genuine_concession_this_round is also true this round (the deterministic stand-in
+    for "engaging constructively": avoids trusting the model's own subjective read, same
+    reasoning as everywhere else this session preferred a payoff-table check over a
+    self-judged one). Always None for proself - see the comment on PROSOCIAL_STRETCH_STEP.
+    """
+    if condition_key == 'prosocial' and turn_number >= PROSOCIAL_STRETCH_ROUND:
+        return dict(PROSOCIAL_STRETCH_STEP)
     return {'issue-7': None, 'issue-3': None}
 
 
@@ -1136,6 +1161,10 @@ def lucid():
                     # _pacing_target(). Computed once, used both for the round note (Step 4)
                     # and the post-hoc enforcement check (Step 5).
                     pacing_target = _pacing_target(condition_key, turn_number)
+                    # Prosocial's OPTIONAL deeper step, if this round is late enough to offer
+                    # it - see _pacing_stretch_target(). Only actually offered to the model
+                    # below when a genuine concession also happens this same round.
+                    pacing_stretch_target = _pacing_stretch_target(condition_key, turn_number)
 
                     # --- Prosocial-only: one-time "first concession" exception ---
                     # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate offers
@@ -1428,6 +1457,30 @@ def lucid():
                                 f"this reply - do not move anything beyond that without further "
                                 f"justification."
                             )
+                            # Prosocial's optional deeper step (see PROSOCIAL_STRETCH_STEP) -
+                            # only mentioned when eligible (round 8+) AND the recruiter hasn't
+                            # already reached it, and only ever as something EARNED this round
+                            # by the genuine concession above, never as a separate free item.
+                            if any(pacing_stretch_target.values()):
+                                prior_by_id_stretch = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                stretch_still_available = []
+                                for issue_id, target in pacing_stretch_target.items():
+                                    if not target:
+                                        continue
+                                    current = prior_by_id_stretch.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
+                                    if _compare_recruiter_value(issue_id, current, target) == 'better':
+                                        label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                                        stretch_still_available.append(f"{label} to {target}")
+                                if stretch_still_available:
+                                    round_note += (
+                                        f" Since the candidate is engaging constructively this late in "
+                                        f"the negotiation, you MAY ALSO stretch further toward "
+                                        f"{' and '.join(stretch_still_available)} as part of this same "
+                                        f"reciprocal move - but only if you secure something specific in "
+                                        f"return on ONE OR TWO other issues in this reply. Do not use the "
+                                        f"stretch for free; if you're not getting anything extra back for "
+                                        f"it, stick to your normal one-step move instead."
+                                    )
                         else:
                             round_note += (
                                 " The candidate did NOT make a genuine concession this round (per "

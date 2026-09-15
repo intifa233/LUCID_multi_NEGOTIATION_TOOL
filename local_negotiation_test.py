@@ -194,6 +194,10 @@ def main():
         # mandatory concession target, name explicitly whatever hasn't been reached yet in the
         # accumulated package (not just what's mentioned this round).
         pacing_target = lucid._pacing_target(condition_key, turn_number)
+        # Prosocial's OPTIONAL deeper step, if this round is late enough to offer it - see
+        # lucid._pacing_stretch_target(). Only actually offered to the model below when a
+        # genuine concession also happens this same round.
+        pacing_stretch_target = lucid._pacing_stretch_target(condition_key, turn_number)
         if any(pacing_target.values()):
             current_by_id = {item['id']: item['status'] for item in current_statuses}
             still_needed = []
@@ -229,6 +233,29 @@ def main():
                     f"on AT MOST ONE other issue in this reply - do not move anything beyond that "
                     f"without further justification."
                 )
+                # Prosocial's optional deeper step - only mentioned when eligible (round 8+)
+                # AND the recruiter hasn't already reached it, and only ever as something
+                # EARNED this round by the genuine concession above, never a separate free item.
+                if any(pacing_stretch_target.values()):
+                    prior_by_id_stretch = {item['id']: item['status'] for item in current_statuses}
+                    stretch_still_available = []
+                    for issue_id, target in pacing_stretch_target.items():
+                        if not target:
+                            continue
+                        current = prior_by_id_stretch.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id]
+                        if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
+                            label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                            stretch_still_available.append(f"{label} to {target}")
+                    if stretch_still_available:
+                        round_note += (
+                            f" Since the candidate is engaging constructively this late in the "
+                            f"negotiation, you MAY ALSO stretch further toward "
+                            f"{' and '.join(stretch_still_available)} as part of this same "
+                            f"reciprocal move - but only if you secure something specific in "
+                            f"return on ONE OR TWO other issues in this reply. Do not use the "
+                            f"stretch for free; if you're not getting anything extra back for it, "
+                            f"stick to your normal one-step move instead."
+                        )
             else:
                 round_note += (
                     " The candidate did NOT make a genuine concession this round (per your "
