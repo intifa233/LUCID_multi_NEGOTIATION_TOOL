@@ -1788,31 +1788,67 @@ def lucid():
                                         f"didn't credit a specific issue/value to verify - allowed to stand."
                                     )
 
-                            # --- General "no free concession" safety net (both conditions,
-                            # every round) - runs LAST, after grant/reciprocity ---
-                            # Complements the reciprocity-claim safety net above: that one only
-                            # catches the model LYING about reciprocating (explicitly crediting a
-                            # fake concession in its own reply text) - this one catches the model
-                            # just silently moving something with no claim at all, by diffing the
-                            # accumulated package against last round directly, regardless of what
-                            # the reply's prose says. Deliberately runs LAST: it re-scans generated_
-                            # text/assistant_updates as they stand after every earlier safety net's
-                            # regeneration (hold-firm/pacing, grant, reciprocity), so it also catches
-                            # anything one of THOSE regenerations introduced - a real failure mode
-                            # observed in testing (an earlier safety net's fresh, uncorrelated retry
-                            # sample volunteering an unrelated ungrounded move nothing else re-checked).
-                            # Skipped when the first-concession exception already governed this
-                            # round's move (its own safety net handles that) and for Salary/Vacation
-                            # moves the pacing schedule itself mandates this round (the pacing safety
-                            # net above already governs those - only flags a move BEYOND what's
-                            # mandated).
+                            # --- Final audit safety net (both conditions, every round) - runs
+                            # LAST, after hold-firm/pacing, grant, and reciprocity ---
+                            # Merges THREE invariants into one final, comprehensive check against
+                            # whatever generated_text/assistant_updates stand at this point, after
+                            # every earlier safety net's regeneration:
+                            #   1. hold-firm (rounds 1-HOLD_FIRM_ROUNDS): Salary/Vacation must
+                            #      still exactly match HOLD_FIRM_ANCHOR - no exceptions, not even
+                            #      a genuine concession this round excuses it.
+                            #   2. pacing minimum: once this round is at/past a pacing deadline,
+                            #      Salary/Vacation must still be at least at pacing_target.
+                            #   3. no free concession: no OTHER issue may have moved in the
+                            #      candidate's favor without a genuine concession this round
+                            #      (original behavior of this safety net, unchanged).
+                            # Rules 1 and 2 exist here IN ADDITION TO the dedicated hold-firm and
+                            # pacing-deadline safety nets above (which only ever run once, first)
+                            # because a LATER safety net's regeneration (grant/reciprocity, each
+                            # independently resampling from the original stale context) can
+                            # silently undo either fix - a real failure mode observed in testing
+                            # for both: hold-firm's anchor reintroduced via a false-positive
+                            # reciprocity claim's regeneration, and separately the round-6 pacing
+                            # minimum reverted the same way. Rule 3's own "genuine concession -this
+                            # round -> allow" exemption doesn't know about rules 1/2's stronger,
+                            # unconditional constraints, so issues already flagged by 1/2 are
+                            # skipped in rule 3 to avoid double-flagging the same issue twice.
+                            # Skipped entirely when the first-concession exception already
+                            # governed this round's move (its own safety net handles that).
                             if not first_concession_note:
                                 accumulated_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
                                 accumulated_by_id_fc = {item['id']: item.get('status', '') for item in accumulated_fc}
                                 prior_by_id_fc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+
+                                # Rule 1: hold-firm - hard constraint, no exemptions.
+                                hold_firm_violations = []
+                                if turn_number <= HOLD_FIRM_ROUNDS:
+                                    for issue_id, anchor in HOLD_FIRM_ANCHOR.items():
+                                        current_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                        if not _matches_anchor(current_val, anchor):
+                                            label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                                            hold_firm_violations.append((issue_id, label, anchor))
+
+                                # Rule 2: pacing minimum - hard constraint once its deadline round
+                                # is reached, regardless of which earlier draft actually got there.
+                                # Hold-firm rounds are excluded (rule 1 already governs those).
+                                pacing_violations = []
+                                if turn_number > HOLD_FIRM_ROUNDS:
+                                    for issue_id, target in pacing_target.items():
+                                        if not target:
+                                            continue
+                                        current_val = accumulated_by_id_fc.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
+                                        if _compare_recruiter_value(issue_id, current_val, target) == 'better':
+                                            label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
+                                            pacing_violations.append((issue_id, label, target))
+
+                                # Rule 3: no free concession - unchanged logic, just skips issues
+                                # already flagged by rule 1/2 above.
+                                already_flagged_ids = {v[0] for v in hold_firm_violations} | {v[0] for v in pacing_violations}
                                 ungrounded_moves = []
                                 for item in _default_issue_statuses():
                                     issue_id = item['id']
+                                    if issue_id in already_flagged_ids:
+                                        continue
                                     new_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
                                     old_val = prior_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
                                     if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
@@ -1829,17 +1865,41 @@ def lucid():
                                     if genuine_concession_this_round:
                                         continue  # a real concession happened - some reciprocal movement is expected
                                     ungrounded_moves.append((issue_id, item['label'], old_val))
-                                if ungrounded_moves:
-                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
-                                    print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
-                                    correction_note = (
-                                        f"[System note: the candidate did not make a genuine concession this "
-                                        f"round, but your previous draft reply moved {targets_desc} anyway. Per "
-                                        f"your negotiation protocol, never move an issue for free. Write your "
-                                        f"reply again: revert {targets_desc} in this reply. You may still "
-                                        f"propose a move conditionally, asking for something specific in "
-                                        f"return, but do not grant it outright.]"
-                                    )
+
+                                if hold_firm_violations or pacing_violations or ungrounded_moves:
+                                    note_parts = []
+                                    if ungrounded_moves:
+                                        targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                                        print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
+                                        note_parts.append(
+                                            f"the candidate did not make a genuine concession this round, but "
+                                            f"your previous draft reply moved {targets_desc} anyway. Per your "
+                                            f"negotiation protocol, never move an issue for free - revert "
+                                            f"{targets_desc} in this reply. You may still propose a move "
+                                            f"conditionally, asking for something specific in return, but do "
+                                            f"not grant it outright"
+                                        )
+                                    if hold_firm_violations:
+                                        violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
+                                        targets_desc = ', '.join(f"{label} to exactly {anchor}" for _, label, anchor in hold_firm_violations)
+                                        print(f"[WARN /lucid] Hold-firm violation surviving to the final check ({targets_desc}), regenerating") # Vercel Log
+                                        note_parts.append(
+                                            f"your previous draft reply still has {violated_labels} moved away "
+                                            f"from its hold-firm anchor - this violates your hold-firm window "
+                                            f"(rounds 1-{HOLD_FIRM_ROUNDS}), which allows NO exceptions, not even "
+                                            f"for a genuine concession this round. Set {targets_desc} in this "
+                                            f"reply, unconditionally"
+                                        )
+                                    if pacing_violations:
+                                        targets_desc = ', '.join(f"{label} to at least {target}" for _, label, target in pacing_violations)
+                                        print(f"[WARN /lucid] Pacing minimum not met in the final check ({targets_desc}), regenerating") # Vercel Log
+                                        note_parts.append(
+                                            f"your previous draft reply still has not reached {targets_desc}, "
+                                            f"which your concession schedule mandates by this round - move "
+                                            f"{targets_desc} in this reply, even if the candidate hasn't "
+                                            f"specifically asked for it"
+                                        )
+                                    correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
                                     retry_text = _call_openai_completion(
                                         messages_for_api + [{'role': 'system', 'content': correction_note}],
                                         model, used_temperature, used_seed, openai_api_key
@@ -1849,16 +1909,24 @@ def lucid():
                                         assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
                                         recheck_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
                                         recheck_by_id_fc = {item['id']: item.get('status', '') for item in recheck_fc}
-                                        still_ungrounded = [
-                                            label for issue_id, label, old_val in ungrounded_moves
+                                        still_bad = []
+                                        for issue_id, label, old_val in ungrounded_moves:
                                             if _compare_recruiter_value(
                                                 issue_id, recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id), old_val
-                                            ) == 'worse'
-                                        ]
-                                        if still_ungrounded:
-                                            print(f"[WARN /lucid] Ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again") # Vercel Log
+                                            ) == 'worse':
+                                                still_bad.append(label)
+                                        for issue_id, label, anchor in hold_firm_violations:
+                                            current_val = recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                            if not _matches_anchor(current_val, anchor):
+                                                still_bad.append(label)
+                                        for issue_id, label, target in pacing_violations:
+                                            current_val = recheck_by_id_fc.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
+                                            if _compare_recruiter_value(issue_id, current_val, target) == 'better':
+                                                still_bad.append(label)
+                                        if still_bad:
+                                            print(f"[WARN /lucid] Still not resolved on {still_bad} after final-check regeneration - keeping it, not retrying again") # Vercel Log
                                     else:
-                                        print("[WARN /lucid] No-free-concession regeneration call failed - keeping original reply") # Vercel Log
+                                        print("[WARN /lucid] Final-check regeneration call failed - keeping original reply") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
