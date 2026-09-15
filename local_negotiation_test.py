@@ -418,66 +418,6 @@ def main():
                 else:
                     print("  [regeneration call failed - keeping original (under-conceded) reply]")
 
-        # --- Same general "no free concession" safety net as lucid.py's /lucid endpoint
-        # (both conditions, every round). Complements the reciprocity-claim safety net
-        # further down: that one only catches the model LYING about reciprocating
-        # (explicitly crediting a fake concession in its own reply text) - this one catches
-        # the model just silently moving something with no claim at all, by diffing the
-        # accumulated package against last round directly. Skipped when the first-concession
-        # exception already governed this round's move, and for Salary/Vacation moves the
-        # pacing schedule itself mandates this round. ---
-        if not first_concession_will_fire:
-            accumulated_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
-            accumulated_by_id_fc = {item['id']: item['status'] for item in accumulated_fc}
-            prior_by_id_fc = {item['id']: item['status'] for item in current_statuses}
-            ungrounded_moves = []
-            for item in lucid._default_issue_statuses():
-                issue_id = item['id']
-                new_val = accumulated_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                old_val = prior_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                    continue  # didn't move in the candidate's favor
-                pacing_step = pacing_target.get(issue_id)
-                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                    continue  # within what the pacing schedule itself mandates this round
-                stretch_step = pacing_stretch_target.get(issue_id)
-                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                    continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
-                    # pacing takes priority in this window, not gated on a fresh concession
-                if genuine_concession_this_round:
-                    continue  # a real concession happened - some reciprocal movement is expected
-                ungrounded_moves.append((issue_id, item['label'], old_val))
-            if ungrounded_moves:
-                targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
-                print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating]")
-                correction_note = (
-                    f"[System note: the candidate did not make a genuine concession this round, "
-                    f"but your previous draft reply moved {targets_desc} anyway. Per your "
-                    f"negotiation protocol, never move an issue for free. Write your reply again: "
-                    f"revert {targets_desc} in this reply. You may still propose a move "
-                    f"conditionally, asking for something specific in return, but do not grant it "
-                    f"outright.]"
-                )
-                retry_text = lucid._call_openai_completion(
-                    messages_for_api + [{'role': 'system', 'content': correction_note}],
-                    model, temperature, None, api_key
-                )
-                if retry_text:
-                    reply = retry_text
-                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                    recheck_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
-                    recheck_by_id_fc = {item['id']: item['status'] for item in recheck_fc}
-                    still_ungrounded = [
-                        label for issue_id, label, old_val in ungrounded_moves
-                        if lucid._compare_recruiter_value(
-                            issue_id, recheck_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id), old_val
-                        ) == 'worse'
-                    ]
-                    if still_ungrounded:
-                        print(f"  [ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again]")
-                else:
-                    print("  [no-free-concession regeneration call failed - keeping original reply]")
-
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
@@ -610,6 +550,67 @@ def main():
                     "Reciprocity claim: reply claimed reciprocity but didn't credit a specific "
                     "issue/value to verify - allowed to stand."
                 )
+
+        # --- Same general "no free concession" safety net as lucid.py's /lucid endpoint
+        # (both conditions, every round) - runs LAST, after grant/reciprocity, so it also
+        # re-scans whatever THOSE regenerations produced. Complements the reciprocity-claim
+        # safety net above: that one only catches the model LYING about reciprocating
+        # (explicitly crediting a fake concession in its own reply text) - this one catches
+        # the model just silently moving something with no claim at all, by diffing the
+        # accumulated package against last round directly. Skipped when the first-concession
+        # exception already governed this round's move, and for Salary/Vacation moves the
+        # pacing schedule itself mandates this round. ---
+        if not first_concession_will_fire:
+            accumulated_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
+            accumulated_by_id_fc = {item['id']: item['status'] for item in accumulated_fc}
+            prior_by_id_fc = {item['id']: item['status'] for item in current_statuses}
+            ungrounded_moves = []
+            for item in lucid._default_issue_statuses():
+                issue_id = item['id']
+                new_val = accumulated_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                old_val = prior_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                    continue  # didn't move in the candidate's favor
+                pacing_step = pacing_target.get(issue_id)
+                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                    continue  # within what the pacing schedule itself mandates this round
+                stretch_step = pacing_stretch_target.get(issue_id)
+                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                    continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
+                    # pacing takes priority in this window, not gated on a fresh concession
+                if genuine_concession_this_round:
+                    continue  # a real concession happened - some reciprocal movement is expected
+                ungrounded_moves.append((issue_id, item['label'], old_val))
+            if ungrounded_moves:
+                targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating]")
+                correction_note = (
+                    f"[System note: the candidate did not make a genuine concession this round, "
+                    f"but your previous draft reply moved {targets_desc} anyway. Per your "
+                    f"negotiation protocol, never move an issue for free. Write your reply again: "
+                    f"revert {targets_desc} in this reply. You may still propose a move "
+                    f"conditionally, asking for something specific in return, but do not grant it "
+                    f"outright.]"
+                )
+                retry_text = lucid._call_openai_completion(
+                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    model, temperature, None, api_key
+                )
+                if retry_text:
+                    reply = retry_text
+                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+                    recheck_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
+                    recheck_by_id_fc = {item['id']: item['status'] for item in recheck_fc}
+                    still_ungrounded = [
+                        label for issue_id, label, old_val in ungrounded_moves
+                        if lucid._compare_recruiter_value(
+                            issue_id, recheck_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id), old_val
+                        ) == 'worse'
+                    ]
+                    if still_ungrounded:
+                        print(f"  [ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again]")
+                else:
+                    print("  [no-free-concession regeneration call failed - keeping original reply]")
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})

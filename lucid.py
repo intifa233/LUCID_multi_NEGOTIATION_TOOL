@@ -338,12 +338,20 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
 
     system_prompt = (
         "You analyze one message from a job RECRUITER in a negotiation. Determine whether the "
-        "recruiter is justifying a concession/grant by crediting the CANDIDATE with having "
-        "given something up or offered flexibility on a specific issue (e.g. 'since you "
-        "offered flexibility on starting earlier, I can...', 'to reciprocate your willingness "
-        "to...'). This must be an explicit or clearly implied claim that the CANDIDATE moved "
-        "or offered something specific on some issue - not just the recruiter unilaterally "
-        "granting something with no such claim. "
+        "recruiter justifies a concession/grant by crediting the CANDIDATE with having ALREADY "
+        "given something up or offered flexibility on a specific issue THIS ROUND (e.g. 'since "
+        "you offered flexibility on starting earlier, I can...', 'to reciprocate your "
+        "willingness to...', 'thank you for coming down to X, so I will...'). This must "
+        "describe the candidate's move as something that has ALREADY happened in the "
+        "conversation - an explicit or clearly implied claim about the past, not a "
+        "hypothetical. "
+        "Do NOT mark this true for a conditional or hypothetical offer where the recruiter "
+        "proposes what THEY would do IF the candidate gives something in the future or in "
+        "return (e.g. 'I am willing to move to 15 days if we can find a way to balance this "
+        "elsewhere', 'I could offer X in exchange for Y', 'would you consider Y so that I can "
+        "offer X'). That is the recruiter proposing their OWN future move, not a claim that "
+        "the candidate already conceded anything - mark claims_reciprocity false for these, "
+        "even if a specific value is mentioned. "
         "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
         "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
         "Coverage, issue-7 Salary, issue-8 Location. "
@@ -1614,73 +1622,6 @@ def lucid():
                                     else:
                                         print("[WARN /lucid] Pacing regeneration call failed - keeping original (under-conceded) reply") # Vercel Log
 
-                            # --- General "no free concession" safety net (both conditions,
-                            # every round) ---
-                            # Complements the reciprocity-claim safety net further below: that
-                            # one only catches the model LYING about reciprocating (explicitly
-                            # crediting a fake concession in its own reply text) - this one
-                            # catches the model just silently moving something with no claim at
-                            # all, by diffing the accumulated package against last round directly,
-                            # regardless of what the reply's prose says. Skipped when the first-
-                            # concession exception already governed this round's move (its own
-                            # safety net above handles that) and for Salary/Vacation moves the
-                            # pacing schedule itself mandates this round (the pacing safety net
-                            # above already governs those - only flags a move BEYOND what's
-                            # mandated).
-                            if not first_concession_note:
-                                accumulated_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
-                                accumulated_by_id_fc = {item['id']: item.get('status', '') for item in accumulated_fc}
-                                prior_by_id_fc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
-                                ungrounded_moves = []
-                                for item in _default_issue_statuses():
-                                    issue_id = item['id']
-                                    new_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                    old_val = prior_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                    if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                                        continue  # didn't move in the candidate's favor
-                                    pacing_step = pacing_target.get(issue_id)
-                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                                        continue  # within what the pacing schedule itself mandates this round
-                                    stretch_step = pacing_stretch_target.get(issue_id)
-                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                                        continue  # within Prosocial's optional stretch ceiling (rounds
-                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
-                                        # pacing takes priority in this window, not gated on a fresh
-                                        # concession this specific round
-                                    if genuine_concession_this_round:
-                                        continue  # a real concession happened - some reciprocal movement is expected
-                                    ungrounded_moves.append((issue_id, item['label'], old_val))
-                                if ungrounded_moves:
-                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
-                                    print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
-                                    correction_note = (
-                                        f"[System note: the candidate did not make a genuine concession this "
-                                        f"round, but your previous draft reply moved {targets_desc} anyway. Per "
-                                        f"your negotiation protocol, never move an issue for free. Write your "
-                                        f"reply again: revert {targets_desc} in this reply. You may still "
-                                        f"propose a move conditionally, asking for something specific in "
-                                        f"return, but do not grant it outright.]"
-                                    )
-                                    retry_text = _call_openai_completion(
-                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
-                                        model, used_temperature, used_seed, openai_api_key
-                                    )
-                                    if retry_text:
-                                        generated_text = retry_text
-                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-                                        recheck_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
-                                        recheck_by_id_fc = {item['id']: item.get('status', '') for item in recheck_fc}
-                                        still_ungrounded = [
-                                            label for issue_id, label, old_val in ungrounded_moves
-                                            if _compare_recruiter_value(
-                                                issue_id, recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id), old_val
-                                            ) == 'worse'
-                                        ]
-                                        if still_ungrounded:
-                                            print(f"[WARN /lucid] Ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again") # Vercel Log
-                                    else:
-                                        print("[WARN /lucid] No-free-concession regeneration call failed - keeping original reply") # Vercel Log
-
                             # --- First-concession grant safety net (Prosocial only, whenever
                             # the exception fired this round) ---
                             # Independent of the two checks above (this can fire any round,
@@ -1846,6 +1787,78 @@ def lucid():
                                         f"Reciprocity claim (round {turn_number}): reply claimed reciprocity but "
                                         f"didn't credit a specific issue/value to verify - allowed to stand."
                                     )
+
+                            # --- General "no free concession" safety net (both conditions,
+                            # every round) - runs LAST, after grant/reciprocity ---
+                            # Complements the reciprocity-claim safety net above: that one only
+                            # catches the model LYING about reciprocating (explicitly crediting a
+                            # fake concession in its own reply text) - this one catches the model
+                            # just silently moving something with no claim at all, by diffing the
+                            # accumulated package against last round directly, regardless of what
+                            # the reply's prose says. Deliberately runs LAST: it re-scans generated_
+                            # text/assistant_updates as they stand after every earlier safety net's
+                            # regeneration (hold-firm/pacing, grant, reciprocity), so it also catches
+                            # anything one of THOSE regenerations introduced - a real failure mode
+                            # observed in testing (an earlier safety net's fresh, uncorrelated retry
+                            # sample volunteering an unrelated ungrounded move nothing else re-checked).
+                            # Skipped when the first-concession exception already governed this
+                            # round's move (its own safety net handles that) and for Salary/Vacation
+                            # moves the pacing schedule itself mandates this round (the pacing safety
+                            # net above already governs those - only flags a move BEYOND what's
+                            # mandated).
+                            if not first_concession_note:
+                                accumulated_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                accumulated_by_id_fc = {item['id']: item.get('status', '') for item in accumulated_fc}
+                                prior_by_id_fc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                ungrounded_moves = []
+                                for item in _default_issue_statuses():
+                                    issue_id = item['id']
+                                    new_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    old_val = prior_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                                        continue  # didn't move in the candidate's favor
+                                    pacing_step = pacing_target.get(issue_id)
+                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                                        continue  # within what the pacing schedule itself mandates this round
+                                    stretch_step = pacing_stretch_target.get(issue_id)
+                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                        continue  # within Prosocial's optional stretch ceiling (rounds
+                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
+                                        # pacing takes priority in this window, not gated on a fresh
+                                        # concession this specific round
+                                    if genuine_concession_this_round:
+                                        continue  # a real concession happened - some reciprocal movement is expected
+                                    ungrounded_moves.append((issue_id, item['label'], old_val))
+                                if ungrounded_moves:
+                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                                    print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
+                                    correction_note = (
+                                        f"[System note: the candidate did not make a genuine concession this "
+                                        f"round, but your previous draft reply moved {targets_desc} anyway. Per "
+                                        f"your negotiation protocol, never move an issue for free. Write your "
+                                        f"reply again: revert {targets_desc} in this reply. You may still "
+                                        f"propose a move conditionally, asking for something specific in "
+                                        f"return, but do not grant it outright.]"
+                                    )
+                                    retry_text = _call_openai_completion(
+                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        model, used_temperature, used_seed, openai_api_key
+                                    )
+                                    if retry_text:
+                                        generated_text = retry_text
+                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                        recheck_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
+                                        recheck_by_id_fc = {item['id']: item.get('status', '') for item in recheck_fc}
+                                        still_ungrounded = [
+                                            label for issue_id, label, old_val in ungrounded_moves
+                                            if _compare_recruiter_value(
+                                                issue_id, recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id), old_val
+                                            ) == 'worse'
+                                        ]
+                                        if still_ungrounded:
+                                            print(f"[WARN /lucid] Ungrounded concession(s) still present on {still_ungrounded} after regeneration - keeping it, not retrying again") # Vercel Log
+                                    else:
+                                        print("[WARN /lucid] No-free-concession regeneration call failed - keeping original reply") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
