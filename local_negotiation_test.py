@@ -105,6 +105,10 @@ def main():
 
         messages.append({'role': 'user', 'content': user_message})
         turn_number += 1
+        # Collects every "couldn't verify via payoff table, trusted the LLM's own judgment"
+        # edge case this round - printed as its own separate block below, apart from Alex's
+        # reply, so these unverified cases are easy to spot while testing.
+        benefit_of_doubt_notes = []
 
         # --- Same ephemeral round-number note as lucid.py's /lucid endpoint (strengthened
         # during the hold-firm window, rounds 1-HOLD_FIRM_ROUNDS) ---
@@ -182,6 +186,18 @@ def main():
                     if conceded_direction in ('worse', 'same'):
                         print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession]")
                         check['is_concession'] = False
+                    elif conceded_direction == 'unknown':
+                        benefit_of_doubt_notes.append(
+                            f"First-concession check: classifier said the candidate conceded "
+                            f"{conceded_issue_id} -> '{conceded_new_value}', but that value couldn't be "
+                            f"matched against the payoff table (unknown) - trusted the classifier's "
+                            f"is_concession=true as-is."
+                        )
+                else:
+                    benefit_of_doubt_notes.append(
+                        "First-concession check: classifier said is_concession=true but didn't name a "
+                        "specific conceded issue/value to verify against the payoff table - trusted as-is."
+                    )
             if check.get('is_concession'):
                 requested_issue_id = check.get('requested_issue_id')
                 in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
@@ -323,9 +339,11 @@ def main():
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
-            grant_status, grant_info = lucid._first_concession_grant_status(
+            grant_status, grant_info, grant_doubt_note = lucid._first_concession_grant_status(
                 current_statuses, assistant_updates, first_concession_target_issue
             )
+            if grant_doubt_note:
+                benefit_of_doubt_notes.append(grant_doubt_note)
             if grant_status != 'ok':
                 if grant_status == 'overshoot':
                     overshoot_issue_id, cap_value = grant_info or (None, None)
@@ -363,9 +381,11 @@ def main():
                 if retry_text:
                     reply = retry_text
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                    recheck_status, _ = lucid._first_concession_grant_status(
+                    recheck_status, _, recheck_doubt_note = lucid._first_concession_grant_status(
                         current_statuses, assistant_updates, first_concession_target_issue
                     )
+                    if recheck_doubt_note:
+                        benefit_of_doubt_notes.append(recheck_doubt_note)
                     if recheck_status != 'ok':
                         print(f"  [first-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again]")
                 else:
@@ -417,10 +437,28 @@ def main():
                             print("  [reciprocity claim still invalid after regeneration - keeping it, not retrying again]")
                     else:
                         print("  [reciprocity-claim regeneration call failed - keeping original reply]")
+                elif credited_direction == 'unknown':
+                    benefit_of_doubt_notes.append(
+                        f"Reciprocity claim: reply credited the candidate with {credited_issue_id} -> "
+                        f"'{credited_value}', but that value couldn't be matched against the payoff "
+                        f"table (unknown) - allowed the reciprocal grant to stand."
+                    )
+            else:
+                benefit_of_doubt_notes.append(
+                    "Reciprocity claim: reply claimed reciprocity but didn't credit a specific "
+                    "issue/value to verify - allowed to stand."
+                )
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
         print(f"\nAlex (round {turn_number}): {reply}\n")
+        # Printed as its own separate block, apart from Alex's reply, per request - so any
+        # unverified "benefit of the doubt" edge case is easy to spot while testing.
+        if benefit_of_doubt_notes:
+            print(f"--- benefit of the doubt (round {turn_number}) ---")
+            for note in benefit_of_doubt_notes:
+                print(f"  * {note}")
+            print("---")
 
 
 if __name__ == '__main__':
