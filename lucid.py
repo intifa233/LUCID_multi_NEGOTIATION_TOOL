@@ -1113,17 +1113,23 @@ def lucid():
                         # and "is actually favorable to the recruiter" are different questions
                         # (e.g. an EARLIER start date reads like a concession but scores WORSE
                         # for the recruiter on the real table - not a real concession at all).
-                        # Only overrides on a confirmed 'worse' reading; 'same'/'unknown' get
-                        # the benefit of the doubt since the extraction can legitimately fail
-                        # to match (letter/date/city text is looser than plain numbers).
+                        # Also covers 'same': accepting a value that's identical to the
+                        # recruiter's own current position isn't giving anything up either -
+                        # e.g. the candidate had asked for June 1 last round, then says "I can
+                        # take a later starting date" with no new value of their own - that's
+                        # just acquiescing to the recruiter's already-standing July 15, not a
+                        # fresh concession worth rewarding. Only 'unknown' gets the benefit of
+                        # the doubt, since the extraction can legitimately fail to match
+                        # (letter/date/city text is looser than plain numbers).
                         if concession_check.get('is_concession'):
                             conceded_issue_id = concession_check.get('conceded_issue_id')
                             conceded_new_value = concession_check.get('conceded_new_value')
                             if conceded_issue_id and conceded_new_value:
                                 prior_by_id_cc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
                                 conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or RECRUITER_OPENING_OFFER.get(conceded_issue_id)
-                                if _compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value) == 'worse':
-                                    print(f"[INFO /lucid] First-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's WORSE for the recruiter - overriding to not-a-concession") # Vercel Log
+                                conceded_direction = _compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value)
+                                if conceded_direction in ('worse', 'same'):
+                                    print(f"[INFO /lucid] First-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but the payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession") # Vercel Log
                                     concession_check['is_concession'] = False
                         if concession_check.get('is_concession'):
                             requested_issue_id = concession_check.get('requested_issue_id')
@@ -1457,7 +1463,12 @@ def lucid():
                             # flexibility on starting earlier, I can reciprocate by...". Whenever
                             # the reply credits the candidate with a specific concession, verify
                             # that claim against RECRUITER_PAYOFF_TABLE before letting the
-                            # reciprocal grant stand.
+                            # reciprocal grant stand. Also covers 'same': crediting the candidate
+                            # for merely accepting the recruiter's own already-standing position
+                            # (nothing actually moved) isn't a concession either - e.g. the
+                            # candidate asks for June 1, then says "I can take a later starting
+                            # date" without naming a value; that's acquiescing to July 15 (already
+                            # on the table), not a fresh concession worth reciprocating.
                             reciprocity_check = _detect_reciprocity_claim_llm(generated_text, openai_api_key)
                             if reciprocity_check.get('claims_reciprocity'):
                                 credited_issue_id = reciprocity_check.get('credited_issue_id')
@@ -1465,12 +1476,13 @@ def lucid():
                                 if credited_issue_id and credited_value:
                                     credited_prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
                                     credited_prior_value = credited_prior_by_id.get(credited_issue_id) or RECRUITER_OPENING_OFFER.get(credited_issue_id)
-                                    if _compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value) == 'worse':
+                                    credited_direction = _compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value)
+                                    if credited_direction in ('worse', 'same'):
                                         credited_label = next(
                                             (item['label'] for item in _default_issue_statuses() if item['id'] == credited_issue_id),
                                             credited_issue_id
                                         )
-                                        print(f"[WARN /lucid] Reciprocity claim invalid - {credited_issue_id}->{credited_value} is NOT favorable to the recruiter, regenerating") # Vercel Log
+                                        print(f"[WARN /lucid] Reciprocity claim invalid - {credited_issue_id}->{credited_value} is {credited_direction.upper()} (not better) for the recruiter, regenerating") # Vercel Log
                                         correction_note = (
                                             f"[System note: your previous draft reply credited the candidate with a "
                                             f"concession on {credited_label} ({credited_value}) and reciprocated based "
@@ -1496,7 +1508,7 @@ def lucid():
                                                 rc_value = recheck.get('credited_value')
                                                 if rc_issue and rc_value:
                                                     rc_prior = credited_prior_by_id.get(rc_issue) or RECRUITER_OPENING_OFFER.get(rc_issue)
-                                                    still_invalid = _compare_recruiter_value(rc_issue, rc_value, rc_prior) == 'worse'
+                                                    still_invalid = _compare_recruiter_value(rc_issue, rc_value, rc_prior) in ('worse', 'same')
                                             if still_invalid:
                                                 print("[WARN /lucid] Reciprocity claim still invalid after regeneration - keeping it, not retrying again") # Vercel Log
                                         else:

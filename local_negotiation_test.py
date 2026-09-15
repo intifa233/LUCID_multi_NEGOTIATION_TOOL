@@ -159,15 +159,19 @@ def main():
             # Cross-check the classifier's framing against the real payoff table before
             # trusting it - "sounds like a concession" isn't the same as "actually favorable
             # to the recruiter" (e.g. an earlier start date reads like a concession but
-            # scores worse for the recruiter on the real table).
+            # scores worse for the recruiter on the real table). Also covers 'same':
+            # accepting a value identical to the recruiter's own current position (e.g.
+            # "I can take a later starting date" with no new value of their own, when the
+            # recruiter's anchor never moved) is acquiescence, not a fresh concession.
             if check.get('is_concession'):
                 conceded_issue_id = check.get('conceded_issue_id')
                 conceded_new_value = check.get('conceded_new_value')
                 if conceded_issue_id and conceded_new_value:
                     prior_by_id_cc = {item['id']: item['status'] for item in current_statuses}
                     conceded_prior_value = prior_by_id_cc.get(conceded_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(conceded_issue_id)
-                    if lucid._compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value) == 'worse':
-                        print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's WORSE for the recruiter - overriding to not-a-concession]")
+                    conceded_direction = lucid._compare_recruiter_value(conceded_issue_id, conceded_new_value, conceded_prior_value)
+                    if conceded_direction in ('worse', 'same'):
+                        print(f"  [first-concession classifier flagged {conceded_issue_id}->{conceded_new_value} as a concession, but payoff table says it's {conceded_direction.upper()} (not better) for the recruiter - overriding to not-a-concession]")
                         check['is_concession'] = False
             if check.get('is_concession'):
                 requested_issue_id = check.get('requested_issue_id')
@@ -368,12 +372,13 @@ def main():
             if credited_issue_id and credited_value:
                 credited_prior_by_id = {item['id']: item['status'] for item in current_statuses}
                 credited_prior_value = credited_prior_by_id.get(credited_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(credited_issue_id)
-                if lucid._compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value) == 'worse':
+                credited_direction = lucid._compare_recruiter_value(credited_issue_id, credited_value, credited_prior_value)
+                if credited_direction in ('worse', 'same'):
                     credited_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == credited_issue_id),
                         credited_issue_id
                     )
-                    print(f"  [reciprocity claim invalid - {credited_issue_id}->{credited_value} is NOT favorable to the recruiter, regenerating]")
+                    print(f"  [reciprocity claim invalid - {credited_issue_id}->{credited_value} is {credited_direction.upper()} (not better) for the recruiter, regenerating]")
                     correction_note = (
                         f"[System note: your previous draft reply credited the candidate with a "
                         f"concession on {credited_label} ({credited_value}) and reciprocated based on "
@@ -398,7 +403,7 @@ def main():
                             rc_value = recheck.get('credited_value')
                             if rc_issue and rc_value:
                                 rc_prior = credited_prior_by_id.get(rc_issue) or lucid.RECRUITER_OPENING_OFFER.get(rc_issue)
-                                still_invalid = lucid._compare_recruiter_value(rc_issue, rc_value, rc_prior) == 'worse'
+                                still_invalid = lucid._compare_recruiter_value(rc_issue, rc_value, rc_prior) in ('worse', 'same')
                         if still_invalid:
                             print("  [reciprocity claim still invalid after regeneration - keeping it, not retrying again]")
                     else:
