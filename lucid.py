@@ -1800,133 +1800,141 @@ def lucid():
                             #      Salary/Vacation must still be at least at pacing_target.
                             #   3. no free concession: no OTHER issue may have moved in the
                             #      candidate's favor without a genuine concession this round
-                            #      (original behavior of this safety net, unchanged).
+                            #      (original behavior of this safety net, unchanged) - SKIPPED
+                            #      when the first-concession exception governed this round's move
+                            #      (its own safety net handles that specific issue). Rules 1/2 are
+                            #      NOT skipped on a first-concession round: the exception never
+                            #      grants directly on Salary/Vacation (it always redirects to a
+                            #      different issue when the requested one is Salary/Vacation), so
+                            #      there is no legitimate conflict - gating all three together was
+                            #      itself a bug (found in testing: a first-concession round that
+                            #      coincided with a missed pacing deadline shipped under-conceded,
+                            #      because the whole final audit had been skipped).
                             # Rules 1 and 2 exist here IN ADDITION TO the dedicated hold-firm and
                             # pacing-deadline safety nets above (which only ever run once, first)
                             # because a LATER safety net's regeneration (grant/reciprocity, each
                             # independently resampling from the original stale context) can
-                            # silently undo either fix - a real failure mode observed in testing
-                            # for both: hold-firm's anchor reintroduced via a false-positive
-                            # reciprocity claim's regeneration, and separately the round-6 pacing
-                            # minimum reverted the same way. Rule 3's own "genuine concession -this
-                            # round -> allow" exemption doesn't know about rules 1/2's stronger,
-                            # unconditional constraints, so issues already flagged by 1/2 are
-                            # skipped in rule 3 to avoid double-flagging the same issue twice.
-                            # Skipped entirely when the first-concession exception already
-                            # governed this round's move (its own safety net handles that).
-                            if not first_concession_note:
-                                accumulated_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
-                                accumulated_by_id_fc = {item['id']: item.get('status', '') for item in accumulated_fc}
-                                prior_by_id_fc = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                            # silently undo either fix - observed in testing for both.
+                            #
+                            # Re-audits fully after every regeneration (up to 2 attempts total)
+                            # instead of only rechecking the issues originally flagged - also
+                            # found in testing: a regeneration meant to fix one thing can
+                            # volunteer an entirely different, previously-clean violation that a
+                            # narrower recheck would miss entirely.
+                            def _audit_final_state(current_assistant_updates):
+                                accumulated = apply_issue_updates(prior_issue_statuses, current_assistant_updates)
+                                accumulated_by_id = {item['id']: item.get('status', '') for item in accumulated}
+                                prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
 
-                                # Rule 1: hold-firm - hard constraint, no exemptions.
-                                hold_firm_violations = []
+                                # Rule 1: hold-firm - hard constraint, no exemptions, runs every
+                                # round regardless of first_concession_note.
+                                hf_violations = []
                                 if turn_number <= HOLD_FIRM_ROUNDS:
                                     for issue_id, anchor in HOLD_FIRM_ANCHOR.items():
-                                        current_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                        current_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
                                         if not _matches_anchor(current_val, anchor):
                                             label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                            hold_firm_violations.append((issue_id, label, anchor))
+                                            hf_violations.append((issue_id, label, anchor))
 
                                 # Rule 2: pacing minimum - hard constraint once its deadline round
-                                # is reached, regardless of which earlier draft actually got there.
-                                # Hold-firm rounds are excluded (rule 1 already governs those).
-                                pacing_violations = []
+                                # is reached, also unconditional on first_concession_note. Hold-firm
+                                # rounds excluded (rule 1 already governs those).
+                                pc_violations = []
                                 if turn_number > HOLD_FIRM_ROUNDS:
                                     for issue_id, target in pacing_target.items():
                                         if not target:
                                             continue
-                                        current_val = accumulated_by_id_fc.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
+                                        current_val = accumulated_by_id.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
                                         if _compare_recruiter_value(issue_id, current_val, target) == 'better':
                                             label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                            pacing_violations.append((issue_id, label, target))
+                                            pc_violations.append((issue_id, label, target))
 
-                                # Rule 3: no free concession - unchanged logic, just skips issues
-                                # already flagged by rule 1/2 above.
-                                already_flagged_ids = {v[0] for v in hold_firm_violations} | {v[0] for v in pacing_violations}
-                                ungrounded_moves = []
-                                for item in _default_issue_statuses():
-                                    issue_id = item['id']
-                                    if issue_id in already_flagged_ids:
-                                        continue
-                                    new_val = accumulated_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                    old_val = prior_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                    if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                                        continue  # didn't move in the candidate's favor
-                                    pacing_step = pacing_target.get(issue_id)
-                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                                        continue  # within what the pacing schedule itself mandates this round
-                                    stretch_step = pacing_stretch_target.get(issue_id)
-                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                                        continue  # within Prosocial's optional stretch ceiling (rounds
-                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
-                                        # pacing takes priority in this window, not gated on a fresh
-                                        # concession this specific round
-                                    if genuine_concession_this_round:
-                                        continue  # a real concession happened - some reciprocal movement is expected
-                                    ungrounded_moves.append((issue_id, item['label'], old_val))
+                                # Rule 3: no free concession - skipped entirely on a first-
+                                # concession round (see note above); skips issues already
+                                # flagged by rule 1/2 to avoid double-flagging.
+                                ug_moves = []
+                                if not first_concession_note:
+                                    already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
+                                    for item in _default_issue_statuses():
+                                        issue_id = item['id']
+                                        if issue_id in already_flagged_ids:
+                                            continue
+                                        new_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                        old_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                        if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                                            continue  # didn't move in the candidate's favor
+                                        pacing_step = pacing_target.get(issue_id)
+                                        if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                                            continue  # within what the pacing schedule itself mandates this round
+                                        stretch_step = pacing_stretch_target.get(issue_id)
+                                        if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                            continue  # within Prosocial's optional stretch ceiling (rounds
+                                            # 8-10 only - pacing_stretch_target is None everywhere else) -
+                                            # pacing takes priority in this window, not gated on a fresh
+                                            # concession this specific round
+                                        if genuine_concession_this_round:
+                                            continue  # a real concession happened - some reciprocal movement is expected
+                                        ug_moves.append((issue_id, item['label'], old_val))
+                                return hf_violations, pc_violations, ug_moves
 
-                                if hold_firm_violations or pacing_violations or ungrounded_moves:
-                                    note_parts = []
-                                    if ungrounded_moves:
-                                        targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
-                                        print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating") # Vercel Log
-                                        note_parts.append(
-                                            f"the candidate did not make a genuine concession this round, but "
-                                            f"your previous draft reply moved {targets_desc} anyway. Per your "
-                                            f"negotiation protocol, never move an issue for free - revert "
-                                            f"{targets_desc} in this reply. You may still propose a move "
-                                            f"conditionally, asking for something specific in return, but do "
-                                            f"not grant it outright"
-                                        )
-                                    if hold_firm_violations:
-                                        violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
-                                        targets_desc = ', '.join(f"{label} to exactly {anchor}" for _, label, anchor in hold_firm_violations)
-                                        print(f"[WARN /lucid] Hold-firm violation surviving to the final check ({targets_desc}), regenerating") # Vercel Log
-                                        note_parts.append(
-                                            f"your previous draft reply still has {violated_labels} moved away "
-                                            f"from its hold-firm anchor - this violates your hold-firm window "
-                                            f"(rounds 1-{HOLD_FIRM_ROUNDS}), which allows NO exceptions, not even "
-                                            f"for a genuine concession this round. Set {targets_desc} in this "
-                                            f"reply, unconditionally"
-                                        )
-                                    if pacing_violations:
-                                        targets_desc = ', '.join(f"{label} to at least {target}" for _, label, target in pacing_violations)
-                                        print(f"[WARN /lucid] Pacing minimum not met in the final check ({targets_desc}), regenerating") # Vercel Log
-                                        note_parts.append(
-                                            f"your previous draft reply still has not reached {targets_desc}, "
-                                            f"which your concession schedule mandates by this round - move "
-                                            f"{targets_desc} in this reply, even if the candidate hasn't "
-                                            f"specifically asked for it"
-                                        )
-                                    correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
-                                    retry_text = _call_openai_completion(
-                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
-                                        model, used_temperature, used_seed, openai_api_key
+                            hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+                            final_audit_attempts = 0
+                            while (hold_firm_violations or pacing_violations or ungrounded_moves) and final_audit_attempts < 2:
+                                final_audit_attempts += 1
+                                note_parts = []
+                                if ungrounded_moves:
+                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                                    print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
+                                    note_parts.append(
+                                        f"the candidate did not make a genuine concession this round, but "
+                                        f"your previous draft reply moved {targets_desc} anyway. Per your "
+                                        f"negotiation protocol, never move an issue for free - revert "
+                                        f"{targets_desc} in this reply. You may still propose a move "
+                                        f"conditionally, asking for something specific in return, but do "
+                                        f"not grant it outright"
                                     )
-                                    if retry_text:
-                                        generated_text = retry_text
-                                        assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-                                        recheck_fc = apply_issue_updates(prior_issue_statuses, assistant_updates)
-                                        recheck_by_id_fc = {item['id']: item.get('status', '') for item in recheck_fc}
-                                        still_bad = []
-                                        for issue_id, label, old_val in ungrounded_moves:
-                                            if _compare_recruiter_value(
-                                                issue_id, recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id), old_val
-                                            ) == 'worse':
-                                                still_bad.append(label)
-                                        for issue_id, label, anchor in hold_firm_violations:
-                                            current_val = recheck_by_id_fc.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                            if not _matches_anchor(current_val, anchor):
-                                                still_bad.append(label)
-                                        for issue_id, label, target in pacing_violations:
-                                            current_val = recheck_by_id_fc.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
-                                            if _compare_recruiter_value(issue_id, current_val, target) == 'better':
-                                                still_bad.append(label)
-                                        if still_bad:
-                                            print(f"[WARN /lucid] Still not resolved on {still_bad} after final-check regeneration - keeping it, not retrying again") # Vercel Log
-                                    else:
-                                        print("[WARN /lucid] Final-check regeneration call failed - keeping original reply") # Vercel Log
+                                if hold_firm_violations:
+                                    violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
+                                    targets_desc = ', '.join(f"{label} to exactly {anchor}" for _, label, anchor in hold_firm_violations)
+                                    print(f"[WARN /lucid] Hold-firm violation surviving to the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
+                                    note_parts.append(
+                                        f"your previous draft reply still has {violated_labels} moved away "
+                                        f"from its hold-firm anchor - this violates your hold-firm window "
+                                        f"(rounds 1-{HOLD_FIRM_ROUNDS}), which allows NO exceptions, not even "
+                                        f"for a genuine concession this round. Set {targets_desc} in this "
+                                        f"reply, unconditionally"
+                                    )
+                                if pacing_violations:
+                                    targets_desc = ', '.join(f"{label} to at least {target}" for _, label, target in pacing_violations)
+                                    print(f"[WARN /lucid] Pacing minimum not met in the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
+                                    note_parts.append(
+                                        f"your previous draft reply still has not reached {targets_desc}, "
+                                        f"which your concession schedule mandates by this round - move "
+                                        f"{targets_desc} in this reply, even if the candidate hasn't "
+                                        f"specifically asked for it"
+                                    )
+                                note_parts.append("keep everything else in your reply exactly as it is")
+                                correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
+                                retry_text = _call_openai_completion(
+                                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                    model, used_temperature, used_seed, openai_api_key
+                                )
+                                if not retry_text:
+                                    print("[WARN /lucid] Final-check regeneration call failed - keeping current reply") # Vercel Log
+                                    break
+                                generated_text = retry_text
+                                assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
+                                # Full re-audit, not just a recheck of the issues flagged above -
+                                # this is what catches a regeneration volunteering a NEW violation.
+                                hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+
+                            if hold_firm_violations or pacing_violations or ungrounded_moves:
+                                still_bad = (
+                                    [label for _, label, _ in hold_firm_violations]
+                                    + [label for _, label, _ in pacing_violations]
+                                    + [label for _, label, _ in ungrounded_moves]
+                                )
+                                print(f"[WARN /lucid] Still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again") # Vercel Log
 
                             # Prepare the successful response data for Qualtrics frontend
                             response_data = {
