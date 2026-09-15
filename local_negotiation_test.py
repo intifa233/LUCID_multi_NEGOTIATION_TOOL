@@ -554,124 +554,123 @@ def main():
         # --- Same final-audit safety net as lucid.py's /lucid endpoint (both conditions,
         # every round) - runs LAST, after grant/reciprocity. Merges THREE invariants:
         #   1. hold-firm (rounds 1-HOLD_FIRM_ROUNDS): Salary/Vacation must still exactly
-        #      match HOLD_FIRM_ANCHOR - no exceptions, not even a genuine concession.
+        #      match HOLD_FIRM_ANCHOR - no exceptions, not even a genuine concession. Runs
+        #      every round, REGARDLESS of first_concession_will_fire - the exception never
+        #      grants directly on Salary/Vacation, so there's no legitimate conflict.
         #   2. pacing minimum: once at/past a pacing deadline, Salary/Vacation must still
-        #      be at least at pacing_target.
+        #      be at least at pacing_target. Also unconditional on first_concession_will_fire.
         #   3. no free concession: no OTHER issue may have moved in the candidate's favor
-        #      without a genuine concession this round (original behavior, unchanged).
+        #      without a genuine concession this round - SKIPPED on a first-concession
+        #      round (its own safety net handles that specific issue).
         # Rules 1/2 exist here IN ADDITION to the dedicated hold-firm/pacing safety nets
         # above (which only ever run once) because a LATER safety net's regeneration
         # (grant/reciprocity) can silently undo either fix - observed in testing for both.
-        # Skipped entirely when the first-concession exception already governed this round.
-        if not first_concession_will_fire:
-            accumulated_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
-            accumulated_by_id_fc = {item['id']: item['status'] for item in accumulated_fc}
-            prior_by_id_fc = {item['id']: item['status'] for item in current_statuses}
+        # Re-audits FULLY after every regeneration (up to 2 attempts) instead of only
+        # rechecking the originally-flagged issues - also observed in testing: a
+        # regeneration meant to fix one thing can volunteer an entirely different,
+        # previously-clean violation that a narrower recheck would miss.
+        def _audit_final_state(current_assistant_updates):
+            accumulated = lucid.apply_issue_updates(current_statuses, current_assistant_updates)
+            accumulated_by_id = {item['id']: item['status'] for item in accumulated}
+            prior_by_id = {item['id']: item['status'] for item in current_statuses}
 
-            # Rule 1: hold-firm - hard constraint, no exemptions.
-            hold_firm_violations = []
+            hf_violations = []
             if turn_number <= lucid.HOLD_FIRM_ROUNDS:
                 for issue_id, anchor in lucid.HOLD_FIRM_ANCHOR.items():
-                    current_val = accumulated_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                    current_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
                     if not lucid._matches_anchor(current_val, anchor):
                         label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                        hold_firm_violations.append((issue_id, label, anchor))
+                        hf_violations.append((issue_id, label, anchor))
 
-            # Rule 2: pacing minimum - hard constraint once its deadline round is reached.
-            # Hold-firm rounds are excluded (rule 1 already governs those).
-            pacing_violations = []
+            pc_violations = []
             if turn_number > lucid.HOLD_FIRM_ROUNDS:
                 for issue_id, target in pacing_target.items():
                     if not target:
                         continue
-                    current_val = accumulated_by_id_fc.get(issue_id) or lucid.HOLD_FIRM_ANCHOR.get(issue_id)
+                    current_val = accumulated_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR.get(issue_id)
                     if lucid._compare_recruiter_value(issue_id, current_val, target) == 'better':
                         label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                        pacing_violations.append((issue_id, label, target))
+                        pc_violations.append((issue_id, label, target))
 
-            # Rule 3: no free concession - unchanged logic, skips issues already flagged above.
-            already_flagged_ids = {v[0] for v in hold_firm_violations} | {v[0] for v in pacing_violations}
-            ungrounded_moves = []
-            for item in lucid._default_issue_statuses():
-                issue_id = item['id']
-                if issue_id in already_flagged_ids:
-                    continue
-                new_val = accumulated_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                old_val = prior_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                    continue  # didn't move in the candidate's favor
-                pacing_step = pacing_target.get(issue_id)
-                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                    continue  # within what the pacing schedule itself mandates this round
-                stretch_step = pacing_stretch_target.get(issue_id)
-                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                    continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
-                    # pacing takes priority in this window, not gated on a fresh concession
-                if genuine_concession_this_round:
-                    continue  # a real concession happened - some reciprocal movement is expected
-                ungrounded_moves.append((issue_id, item['label'], old_val))
+            ug_moves = []
+            if not first_concession_will_fire:
+                already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
+                for item in lucid._default_issue_statuses():
+                    issue_id = item['id']
+                    if issue_id in already_flagged_ids:
+                        continue
+                    new_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                    old_val = prior_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                    if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                        continue  # didn't move in the candidate's favor
+                    pacing_step = pacing_target.get(issue_id)
+                    if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                        continue  # within what the pacing schedule itself mandates this round
+                    stretch_step = pacing_stretch_target.get(issue_id)
+                    if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                        continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
+                        # pacing takes priority in this window, not gated on a fresh concession
+                    if genuine_concession_this_round:
+                        continue  # a real concession happened - some reciprocal movement is expected
+                    ug_moves.append((issue_id, item['label'], old_val))
+            return hf_violations, pc_violations, ug_moves
 
-            if hold_firm_violations or pacing_violations or ungrounded_moves:
-                note_parts = []
-                if ungrounded_moves:
-                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
-                    print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating]")
-                    note_parts.append(
-                        f"the candidate did not make a genuine concession this round, but "
-                        f"your previous draft reply moved {targets_desc} anyway. Per your "
-                        f"negotiation protocol, never move an issue for free - revert "
-                        f"{targets_desc} in this reply. You may still propose a move "
-                        f"conditionally, asking for something specific in return, but do "
-                        f"not grant it outright"
-                    )
-                if hold_firm_violations:
-                    violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
-                    targets_desc = ', '.join(f"{label} to exactly {anchor}" for _, label, anchor in hold_firm_violations)
-                    print(f"  [hold-firm violation surviving to the final check ({targets_desc}), regenerating]")
-                    note_parts.append(
-                        f"your previous draft reply still has {violated_labels} moved away "
-                        f"from its hold-firm anchor - this violates your hold-firm window "
-                        f"(rounds 1-{lucid.HOLD_FIRM_ROUNDS}), which allows NO exceptions, not "
-                        f"even for a genuine concession this round. Set {targets_desc} in "
-                        f"this reply, unconditionally"
-                    )
-                if pacing_violations:
-                    targets_desc = ', '.join(f"{label} to at least {target}" for _, label, target in pacing_violations)
-                    print(f"  [pacing minimum not met in the final check ({targets_desc}), regenerating]")
-                    note_parts.append(
-                        f"your previous draft reply still has not reached {targets_desc}, "
-                        f"which your concession schedule mandates by this round - move "
-                        f"{targets_desc} in this reply, even if the candidate hasn't "
-                        f"specifically asked for it"
-                    )
-                correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
-                retry_text = lucid._call_openai_completion(
-                    messages_for_api + [{'role': 'system', 'content': correction_note}],
-                    model, temperature, None, api_key
+        hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+        final_audit_attempts = 0
+        while (hold_firm_violations or pacing_violations or ungrounded_moves) and final_audit_attempts < 2:
+            final_audit_attempts += 1
+            note_parts = []
+            if ungrounded_moves:
+                targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
+                print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
+                note_parts.append(
+                    f"the candidate did not make a genuine concession this round, but "
+                    f"your previous draft reply moved {targets_desc} anyway. Per your "
+                    f"negotiation protocol, never move an issue for free - revert "
+                    f"{targets_desc} in this reply. You may still propose a move "
+                    f"conditionally, asking for something specific in return, but do "
+                    f"not grant it outright"
                 )
-                if retry_text:
-                    reply = retry_text
-                    assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                    recheck_fc = lucid.apply_issue_updates(current_statuses, assistant_updates)
-                    recheck_by_id_fc = {item['id']: item['status'] for item in recheck_fc}
-                    still_bad = []
-                    for issue_id, label, old_val in ungrounded_moves:
-                        if lucid._compare_recruiter_value(
-                            issue_id, recheck_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id), old_val
-                        ) == 'worse':
-                            still_bad.append(label)
-                    for issue_id, label, anchor in hold_firm_violations:
-                        current_val = recheck_by_id_fc.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                        if not lucid._matches_anchor(current_val, anchor):
-                            still_bad.append(label)
-                    for issue_id, label, target in pacing_violations:
-                        current_val = recheck_by_id_fc.get(issue_id) or lucid.HOLD_FIRM_ANCHOR.get(issue_id)
-                        if lucid._compare_recruiter_value(issue_id, current_val, target) == 'better':
-                            still_bad.append(label)
-                    if still_bad:
-                        print(f"  [still not resolved on {still_bad} after final-check regeneration - keeping it, not retrying again]")
-                else:
-                    print("  [final-check regeneration call failed - keeping original reply]")
+            if hold_firm_violations:
+                violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
+                targets_desc = ', '.join(f"{label} to exactly {anchor}" for _, label, anchor in hold_firm_violations)
+                print(f"  [hold-firm violation surviving to the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
+                note_parts.append(
+                    f"your previous draft reply still has {violated_labels} moved away "
+                    f"from its hold-firm anchor - this violates your hold-firm window "
+                    f"(rounds 1-{lucid.HOLD_FIRM_ROUNDS}), which allows NO exceptions, not "
+                    f"even for a genuine concession this round. Set {targets_desc} in "
+                    f"this reply, unconditionally"
+                )
+            if pacing_violations:
+                targets_desc = ', '.join(f"{label} to at least {target}" for _, label, target in pacing_violations)
+                print(f"  [pacing minimum not met in the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
+                note_parts.append(
+                    f"your previous draft reply still has not reached {targets_desc}, "
+                    f"which your concession schedule mandates by this round - move "
+                    f"{targets_desc} in this reply, even if the candidate hasn't "
+                    f"specifically asked for it"
+                )
+            note_parts.append("keep everything else in your reply exactly as it is")
+            correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
+            retry_text = lucid._call_openai_completion(
+                messages_for_api + [{'role': 'system', 'content': correction_note}],
+                model, temperature, None, api_key
+            )
+            if not retry_text:
+                print("  [final-check regeneration call failed - keeping current reply]")
+                break
+            reply = retry_text
+            assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
+            hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+
+        if hold_firm_violations or pacing_violations or ungrounded_moves:
+            still_bad = (
+                [label for _, label, _ in hold_firm_violations]
+                + [label for _, label, _ in pacing_violations]
+                + [label for _, label, _ in ungrounded_moves]
+            )
+            print(f"  [still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again]")
 
         current_statuses = lucid.apply_issue_updates(current_statuses, assistant_updates)
         messages.append({'role': 'assistant', 'content': reply})
