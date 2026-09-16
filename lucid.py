@@ -657,6 +657,44 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
     return ('missing', None, None)
 
 
+def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updates, target_issue_id, raw_text):
+    """
+    Wraps _first_concession_grant_status with one deterministic recovery attempt: if the
+    result is 'missing' specifically because target_issue_id is absent from assistant_updates
+    entirely, fall back to a plain regex match against raw_text's "Current package:" recap
+    line for that issue's label - no extra LLM call. Addresses a real, reproduced
+    gpt-4o-mini extraction failure mode (found in testing): it can silently drop a key from
+    its JSON output even when the value is stated plainly and unambiguously in the recap
+    (e.g. "Insurance Coverage: Plan C" present verbatim, nothing else said about it) - unlike
+    the separate "extraction sides with prose over recap" pattern documented elsewhere, this
+    isn't a disagreement to resolve, the key is just missing. Since we already know exactly
+    which single issue to look for (the model was told exactly which one to grant), a plain
+    line match is enough - no need to trust another LLM call to get it right either.
+
+    Returns (status, info, unverified_note, assistant_updates) - assistant_updates comes
+    back unchanged unless the fallback recovers a value AND that recovery confirms status
+    'ok', in which case a patched copy is returned so the recovered value also feeds forward
+    into this round's issue-status tracking, not just this one check.
+    """
+    status, info, note = _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id)
+    if status != 'missing' or not target_issue_id or target_issue_id in assistant_updates:
+        return status, info, note, assistant_updates
+    label = next((item['label'] for item in _default_issue_statuses() if item['id'] == target_issue_id), None)
+    if not label:
+        return status, info, note, assistant_updates
+    cleaned = str(raw_text or '').replace('**', '')
+    matches = re.findall(rf'{re.escape(label)}\s*:\s*([^\n]+)', cleaned, flags=re.IGNORECASE)
+    if not matches:
+        return status, info, note, assistant_updates
+    patched_updates = dict(assistant_updates)
+    patched_updates[target_issue_id] = matches[-1].strip()
+    patched_status, patched_info, patched_note = _first_concession_grant_status(prior_statuses, patched_updates, target_issue_id)
+    if patched_status == 'ok':
+        print(f"[INFO /lucid] Extraction dropped {target_issue_id} entirely - recovered via recap regex fallback: {patched_updates[target_issue_id]!r}") # Vercel Log
+        return patched_status, patched_info, patched_note, patched_updates
+    return status, info, note, assistant_updates
+
+
 # --- Round-based concession pacing targets (both conditions) ---
 # Turns prompts.yaml's [CONCESSION PACING] prose into an explicit, checkable requirement:
 # by the round the schedule names as a deadline, Salary/Vacation Time must have moved at
@@ -1631,8 +1669,8 @@ def lucid():
                             # more than that - using the real payoff table rather than
                             # trusting the model followed through.
                             if first_concession_note:
-                                grant_status, grant_info, grant_unverified_note = _first_concession_grant_status(
-                                    prior_issue_statuses, assistant_updates, first_concession_target_issue
+                                grant_status, grant_info, grant_unverified_note, assistant_updates = _first_concession_grant_status_with_fallback(
+                                    prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text
                                 )
                                 if grant_unverified_note:
                                     unverified_trust_notes.append(grant_unverified_note)
@@ -1673,8 +1711,8 @@ def lucid():
                                     if retry_text:
                                         generated_text = retry_text
                                         assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
-                                        recheck_status, recheck_info, recheck_unverified_note = _first_concession_grant_status(
-                                            prior_issue_statuses, assistant_updates, first_concession_target_issue
+                                        recheck_status, recheck_info, recheck_unverified_note, assistant_updates = _first_concession_grant_status_with_fallback(
+                                            prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text
                                         )
                                         if recheck_unverified_note:
                                             unverified_trust_notes.append(recheck_unverified_note)
