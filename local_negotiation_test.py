@@ -18,8 +18,10 @@ Setup:
     3. Pick a condition, then type candidate messages. Type "quit" to stop.
 
 Optional env vars (set in .env or the shell):
-    LUCID_TEST_MODEL         - defaults to gpt-4o (matches lucid.py's default)
-    LUCID_TEST_TEMPERATURE   - defaults to 1.0 (matches lucid.py's default)
+    LUCID_TEST_MODEL         - defaults to gpt-5.6 (matches lucid.py's default)
+    LUCID_TEST_TEMPERATURE   - defaults to 1.0 (matches lucid.py's default; gpt-5.x models
+                               reject anything but 1.0, so leave this alone unless you
+                               override LUCID_TEST_MODEL to something else too)
 """
 import os
 import sys

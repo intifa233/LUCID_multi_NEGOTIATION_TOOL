@@ -110,13 +110,22 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
     cleaned_message = re.sub(r'\s+', ' ', cleaned_message).strip()
 
     payload = {
-        'model': 'gpt-4o-mini',
+        'model': 'gpt-5.6',
         'messages': [
             {'role': 'system', 'content': prompt},
             {'role': 'user', 'content': cleaned_message}
         ],
-        'temperature': 0.0,
-        'max_tokens': 600,
+        # gpt-5.6 rejects any 'temperature' other than its default (1), so it's omitted
+        # here rather than pinned to 0 - the old gpt-4o-mini extractor used temperature 0
+        # specifically for determinism; gpt-5.6 has no equivalent knob, so this call is no
+        # longer guaranteed deterministic (measured, empirically more reliable regardless -
+        # see the extractor-swap test findings). Also uses 'max_completion_tokens', not
+        # 'max_tokens' - gpt-5.6 rejects that key outright. Sized well above typical usage
+        # (measured ~100-250 total) because gpt-5.6 spends invisible reasoning_tokens out of
+        # this same budget before any visible JSON - too tight a cap can exhaust it on
+        # reasoning alone and return empty content (observed live at max_completion_tokens=150
+        # on the classifiers below; this call already had headroom, widened further to match).
+        'max_completion_tokens': 900,
         'response_format': {'type': 'json_object'}
     }
 
@@ -270,13 +279,17 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     )
 
     payload = {
-        'model': 'gpt-4o-mini',  # fast/cheap model for a single lightweight classification
+        'model': 'gpt-5.6',  # single lightweight classification call
         'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': str(user_message)}
         ],
-        'temperature': 0.0,  # deterministic classification
-        'max_tokens': 150,
+        # gpt-5.6 rejects any 'temperature' but its default (1) - no equivalent to the old
+        # gpt-4o-mini call's temperature=0 determinism guarantee. 'max_completion_tokens',
+        # not 'max_tokens' - gpt-5.6 rejects that key outright. 150 was too tight: gpt-5.6
+        # spends invisible reasoning_tokens out of this same budget before any visible JSON,
+        # and 150 was observed live exhausting entirely on reasoning, returning empty content.
+        'max_completion_tokens': 450,
         'response_format': {'type': 'json_object'}
     }
     headers = {
@@ -364,13 +377,17 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
     )
 
     payload = {
-        'model': 'gpt-4o-mini',  # fast/cheap model for a single lightweight classification
+        'model': 'gpt-5.6',  # single lightweight classification call
         'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': str(assistant_message)}
         ],
-        'temperature': 0.0,  # deterministic classification
-        'max_tokens': 150,
+        # gpt-5.6 rejects any 'temperature' but its default (1) - no equivalent to the old
+        # gpt-4o-mini call's temperature=0 determinism guarantee. 'max_completion_tokens',
+        # not 'max_tokens' - gpt-5.6 rejects that key outright. 150 was too tight: gpt-5.6
+        # spends invisible reasoning_tokens out of this same budget before any visible JSON,
+        # and 150 was observed live exhausting entirely on reasoning, returning empty content.
+        'max_completion_tokens': 450,
         'response_format': {'type': 'json_object'}
     }
     headers = {
@@ -1124,7 +1141,7 @@ def lucid():
             # API Key found, proceed to extract data and call OpenAI
 
             # Extract parameters sent from Qualtrics frontend
-            model = body.get('model', 'gpt-4o') # Use model from request, default to gpt-4o if not sent (JS usually sends its default)
+            model = body.get('model', 'gpt-5.6') # Use model from request, default to gpt-5.6 if not sent (JS usually sends its default)
             messages = body.get('messages', []) # Get message history array
             temp_from_frontend = body.get('temperature') # Get optional temperature
             seed_from_frontend = body.get('seed') # Get optional seed
@@ -1170,6 +1187,12 @@ def lucid():
                             if 0.0 <= parsed_temp <= 2.0: used_temperature = parsed_temp
                             else: print(f"[WARN /lucid] Temp '{parsed_temp}' out of range, using default.") # Vercel Log
                         except (ValueError, TypeError): print(f"[WARN /lucid] Invalid temp format ('{temp_from_frontend}'), using default.") # Vercel Log
+                    # gpt-5.x models reject any temperature value other than the default (1) -
+                    # the API 400s outright on e.g. 0.7, rather than clamping it itself. Force
+                    # it here so a stale/manual temperature request never breaks the call.
+                    if model.startswith('gpt-5') and used_temperature != 1.0:
+                        print(f"[INFO /lucid] Model '{model}' only supports temperature=1 - overriding requested {used_temperature}") # Vercel Log
+                        used_temperature = 1.0
                     print(f"[INFO /lucid] Using temperature: {used_temperature}") # Vercel Log
 
                     # Process seed (use value from frontend if valid, otherwise default to None)
