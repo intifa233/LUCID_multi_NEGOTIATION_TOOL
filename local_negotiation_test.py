@@ -421,8 +421,8 @@ def main():
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
-            grant_status, grant_info, grant_unverified_note = lucid._first_concession_grant_status(
-                current_statuses, assistant_updates, first_concession_target_issue
+            grant_status, grant_info, grant_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
+                current_statuses, assistant_updates, first_concession_target_issue, reply
             )
             if grant_unverified_note:
                 unverified_trust_notes.append(grant_unverified_note)
@@ -463,8 +463,8 @@ def main():
                 if retry_text:
                     reply = retry_text
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-                    recheck_status, recheck_info, recheck_unverified_note = lucid._first_concession_grant_status(
-                        current_statuses, assistant_updates, first_concession_target_issue
+                    recheck_status, recheck_info, recheck_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
+                        current_statuses, assistant_updates, first_concession_target_issue, reply
                     )
                     if recheck_unverified_note:
                         unverified_trust_notes.append(recheck_unverified_note)
