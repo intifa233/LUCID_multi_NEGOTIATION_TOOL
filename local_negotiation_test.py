@@ -125,7 +125,8 @@ def main():
         genuine_concession_label = None
         genuine_concession_value = None
         round_concession_check = {'is_concession': False, 'requested_issue_id': None,
-                                   'conceded_issue_id': None, 'conceded_new_value': None}
+                                   'conceded_issue_id': None, 'conceded_new_value': None,
+                                   'accepts_prior_offer': False}
         # Ground the classifier with the recruiter's full current package (falling back to
         # RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate message
         # like "I can take a later start date" gets extracted as the concrete value actually
@@ -134,7 +135,17 @@ def main():
             dict(item, status=item['status'] or lucid.RECRUITER_OPENING_OFFER.get(item['id'], ''))
             for item in current_statuses
         ]
-        round_concession_check = lucid._detect_first_concession_llm(user_message, api_key, current_offer_for_classifier)
+        # Same as lucid.py's /lucid endpoint: the recruiter's own last reply (before this
+        # turn's, which hasn't been generated yet), so the classifier can also judge whether
+        # user_message is accepting a conditional trade proposed there.
+        prior_assistant_message = ''
+        for msg in reversed(messages):
+            if msg.get('role') == 'assistant':
+                prior_assistant_message = str(msg.get('content', ''))
+                break
+        round_concession_check = lucid._detect_first_concession_llm(
+            user_message, api_key, current_offer_for_classifier, prior_assistant_message
+        )
         # Cross-check the classifier's framing against the real payoff table before trusting
         # it - "sounds like a concession" isn't the same as "actually favorable to the
         # recruiter" (e.g. an earlier start date reads like a concession but scores worse for
@@ -234,6 +245,19 @@ def main():
                     f"Per your negotiation protocol, you may reciprocate with a proportional move "
                     f"on AT MOST ONE other issue in this reply - do not move anything beyond that "
                     f"without further justification."
+                )
+            elif round_concession_check.get('accepts_prior_offer'):
+                # Same as lucid.py's /lucid endpoint: the candidate's message doesn't concede
+                # anything new itself, but it IS accepting a conditional trade the recruiter
+                # proposed in its own previous reply - grounds to follow through, not to hold back.
+                round_note += (
+                    " The candidate appears to be accepting the conditional trade you proposed "
+                    "in your OWN previous message (something like \"if you accept X, I'll offer "
+                    "Y\"). If your previous reply named a specific conditional trade, apply that "
+                    "exact trade now, unconditionally, in this reply's \"Current package\" recap "
+                    "- do not ask them to reconfirm or revert what you already offered. If your "
+                    "previous reply did NOT actually name a specific conditional trade, treat "
+                    "this the same as no genuine concession this round instead."
                 )
             else:
                 round_note += (
@@ -628,6 +652,9 @@ def main():
                         # pacing takes priority in this window, not gated on a fresh concession
                     if genuine_concession_this_round:
                         continue  # a real concession happened - some reciprocal movement is expected
+                    if round_concession_check.get('accepts_prior_offer'):
+                        continue  # candidate accepted a trade the recruiter itself already
+                        # proposed - not a free giveaway, it's the recruiter following through
                     ug_moves.append((issue_id, item['label'], old_val))
             return hf_violations, pc_violations, ug_moves
 

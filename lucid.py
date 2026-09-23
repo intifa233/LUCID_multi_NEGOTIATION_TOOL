@@ -199,7 +199,7 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
         return {}
 
 
-def _detect_first_concession_llm(user_message, openai_api_key, current_offer_statuses=None):
+def _detect_first_concession_llm(user_message, openai_api_key, current_offer_statuses=None, prior_assistant_message=None):
     """
     Used only for the Prosocial condition's one-time "first concession" exception
     (see prompts.yaml [NEGOTIATION PROTOCOL]): judges whether the candidate's latest
@@ -231,13 +231,26 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     15"), so the caller's 'same' check (see _compare_recruiter_value) can correctly catch
     that this is acquiescence, not a fresh concession.
 
+    prior_assistant_message (optional, the RECRUITER's own immediately preceding reply) is
+    given so this same call can also answer a second, distinct question - piggybacked here
+    rather than as a separate API call since the candidate's message is already being sent -
+    whether the candidate's message is simply ACCEPTING a conditional trade the recruiter
+    itself proposed last round (e.g. recruiter said "if you accept X, I'll offer Y", candidate
+    now says "ok deal"). Found live in production: without this, "ok deal" doesn't look like a
+    new concession to this classifier (nothing is being conceded, just accepted), so the
+    general "no free concession" round-note prescription told the model it couldn't move
+    anything - even though the recruiter's own prior offer was what was being accepted, not a
+    freebie the candidate was fishing for. Distinct from is_concession: a message can accept a
+    prior offer without conceding anything new itself.
+
     Returns {'is_concession': False, 'requested_issue_id': None, 'conceded_issue_id': None,
-    'conceded_new_value': None} on any failure, or if no message/key was given, so this
-    never blocks the main call.
+    'conceded_new_value': None, 'accepts_prior_offer': False} on any failure, or if no
+    message/key was given, so this never blocks the main call.
     """
     empty_result = {
         'is_concession': False, 'requested_issue_id': None,
-        'conceded_issue_id': None, 'conceded_new_value': None
+        'conceded_issue_id': None, 'conceded_new_value': None,
+        'accepts_prior_offer': False
     }
     if not user_message or not openai_api_key:
         return dict(empty_result)
@@ -262,18 +275,36 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
                 "quo is not a fresh concession, and the exact value is needed to verify that."
             )
 
+    prior_offer_note = ""
+    if prior_assistant_message:
+        prior_offer_note = (
+            "\nThe RECRUITER's own immediately preceding message (for judging "
+            "accepts_prior_offer only) was:\n" + str(prior_assistant_message)
+        )
+
     system_prompt = (
-        "You analyze one message from a job candidate in a negotiation. Determine whether "
-        "the candidate is offering a TRADE: willing to give ground / accept less on one "
-        "issue, specifically in order to ask for movement on a DIFFERENT issue. This must "
-        "be an explicit or clearly implied concession paired with a request, not just a "
-        "one-sided ask with no give. "
+        "You analyze one message from a job candidate in a negotiation. Determine TWO "
+        "separate things. "
+        "(1) is_concession: is the candidate offering a TRADE - willing to give ground / "
+        "accept less on one issue, specifically in order to ask for movement on a DIFFERENT "
+        "issue? This must be an explicit or clearly implied concession paired with a "
+        "request, not just a one-sided ask with no give. "
+        "(2) accepts_prior_offer: is the candidate simply ACCEPTING a conditional trade the "
+        "RECRUITER itself proposed in its preceding message shown below (e.g. the recruiter "
+        "said something like 'if you accept X, I'll offer Y', and the candidate's message "
+        "here is an agreement like 'ok deal', 'that works', 'I accept', 'sounds good')? "
+        "This is true ONLY if the recruiter's preceding message actually named a specific "
+        "conditional trade AND the candidate's message here clearly agrees to it - not for a "
+        "generic pleasant reply with no specific trade to accept. A message can be true for "
+        "accepts_prior_offer while is_concession is false (accepting isn't conceding "
+        "something new) - they are independent, check both. "
         "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
         "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
         "Coverage, issue-7 Salary, issue-8 Location. "
         "Return ONLY valid JSON in this exact shape: "
         "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\", "
-        "\"conceded_issue_id\": \"issue-4\", \"conceded_new_value\": \"July 1\"}. "
+        "\"conceded_issue_id\": \"issue-4\", \"conceded_new_value\": \"July 1\", "
+        "\"accepts_prior_offer\": false}. "
         "requested_issue_id is the issue the candidate is asking the RECRUITER to move on "
         "or improve - use null if is_concession is false or the requested issue is unclear. "
         "conceded_issue_id/conceded_new_value describe what the candidate is giving ground "
@@ -281,6 +312,7 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         "'July 1', 'Division C', '80%') - not a description. Use null for both if "
         "is_concession is false or this is unclear."
         + current_offer_note
+        + prior_offer_note
     )
 
     payload = {
@@ -323,11 +355,13 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
             conceded_issue_id = None
         conceded_new_value = parsed.get('conceded_new_value')
         conceded_new_value = str(conceded_new_value).strip() if conceded_new_value else None
+        accepts_prior_offer = bool(parsed.get('accepts_prior_offer'))
         return {
             'is_concession': is_concession,
             'requested_issue_id': requested_issue_id,
             'conceded_issue_id': conceded_issue_id,
-            'conceded_new_value': conceded_new_value
+            'conceded_new_value': conceded_new_value,
+            'accepts_prior_offer': accepts_prior_offer
         }
 
     except Exception as e:
@@ -1239,6 +1273,17 @@ def lucid():
                             latest_user_message = str(msg.get('content', ''))
                             break
 
+                    # The recruiter's own most recent reply (last round's, not this round's -
+                    # that hasn't been generated yet). Needed so the concession classifier can
+                    # also judge whether latest_user_message is simply ACCEPTING a conditional
+                    # trade proposed there (see _detect_first_concession_llm's
+                    # accepts_prior_offer).
+                    prior_assistant_message = ''
+                    for msg in reversed(messages):
+                        if msg.get('role') == 'assistant':
+                            prior_assistant_message = str(msg.get('content', ''))
+                            break
+
                     # The accumulated package as of last round (frontend echoes this back, same
                     # as issue_statuses elsewhere). Computed here (rather than only later, where
                     # the older code path did) so the pacing-target check in Step 5 can compare
@@ -1317,7 +1362,8 @@ def lucid():
                     genuine_concession_value = None
                     round_concession_check = {
                         'is_concession': False, 'requested_issue_id': None,
-                        'conceded_issue_id': None, 'conceded_new_value': None
+                        'conceded_issue_id': None, 'conceded_new_value': None,
+                        'accepts_prior_offer': False
                     }
                     if latest_user_message:
                         # Fill in RECRUITER_OPENING_OFFER for any issue prior_issue_statuses
@@ -1328,7 +1374,7 @@ def lucid():
                             dict(item, status=item.get('status') or RECRUITER_OPENING_OFFER.get(item['id'], ''))
                             for item in prior_issue_statuses
                         ]
-                        round_concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key, current_offer_for_classifier)
+                        round_concession_check = _detect_first_concession_llm(latest_user_message, openai_api_key, current_offer_for_classifier, prior_assistant_message)
                         if round_concession_check.get('is_concession'):
                             conceded_issue_id = round_concession_check.get('conceded_issue_id')
                             conceded_new_value = round_concession_check.get('conceded_new_value')
@@ -1544,6 +1590,22 @@ def lucid():
                                 f"reciprocate with a proportional move on AT MOST ONE other issue in "
                                 f"this reply - do not move anything beyond that without further "
                                 f"justification."
+                            )
+                        elif round_concession_check.get('accepts_prior_offer'):
+                            # Found live in production: the candidate's message (e.g. "ok deal")
+                            # doesn't itself concede anything new, so genuine_concession_this_round
+                            # is correctly false here - but it IS accepting a conditional trade the
+                            # recruiter proposed in its own previous reply, and that's grounds
+                            # enough to follow through, not a reason to hold back.
+                            round_note += (
+                                " The candidate appears to be accepting the conditional trade you "
+                                "proposed in your OWN previous message (something like \"if you "
+                                "accept X, I'll offer Y\"). If your previous reply named a specific "
+                                "conditional trade, apply that exact trade now, unconditionally, in "
+                                "this reply's \"Current package\" recap - do not ask them to "
+                                "reconfirm or revert what you already offered. If your previous "
+                                "reply did NOT actually name a specific conditional trade, treat "
+                                "this the same as no genuine concession this round instead."
                             )
                         else:
                             round_note += (
@@ -1978,6 +2040,10 @@ def lucid():
                                             # concession this specific round
                                         if genuine_concession_this_round:
                                             continue  # a real concession happened - some reciprocal movement is expected
+                                        if round_concession_check.get('accepts_prior_offer'):
+                                            continue  # candidate accepted a trade the recruiter itself
+                                            # already proposed - not a free giveaway, it's the
+                                            # recruiter following through on its own prior offer
                                         ug_moves.append((issue_id, item['label'], old_val))
                                 return hf_violations, pc_violations, ug_moves
 
