@@ -135,7 +135,12 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
     }
 
     try:
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=12)
+        # 25s (was 12s) - gpt-5.6 spends invisible reasoning_tokens before any visible
+        # output, so this call runs slower/more variable than the old gpt-4o-mini one this
+        # timeout was originally sized for. This call IS caught locally (returns {} below on
+        # any exception), so a timeout here degrades gracefully rather than 500ing - but too
+        # tight a timeout still means losing this round's extraction unnecessarily often.
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] LLM issue-update extraction returned {resp.status_code}, skipping updates")
             return {}
@@ -298,7 +303,11 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     }
 
     try:
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
+        # 25s (was 10s) - gpt-5.6 spends invisible reasoning_tokens before any visible
+        # output; this call IS caught locally (degrades gracefully to the empty default on
+        # any exception), but too tight a timeout means losing this classification more
+        # often than necessary.
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] First-concession detection returned {resp.status_code}, skipping")
             return dict(empty_result)
@@ -396,7 +405,11 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
     }
 
     try:
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=10)
+        # 25s (was 10s) - gpt-5.6 spends invisible reasoning_tokens before any visible
+        # output; this call IS caught locally (degrades gracefully to the empty default on
+        # any exception), but too tight a timeout means losing this classification more
+        # often than necessary.
+        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] Reciprocity-claim detection returned {resp.status_code}, skipping")
             return dict(empty_result)
@@ -762,7 +775,7 @@ def _pacing_stretch_target(condition_key, turn_number):
     return {'issue-7': None, 'issue-3': None}
 
 
-def _call_openai_completion(messages, model, temperature, seed, openai_api_key, timeout=30):
+def _call_openai_completion(messages, model, temperature, seed, openai_api_key, timeout=45):
     """
     Minimal OpenAI chat completion call used only for the hold-firm regeneration retry
     (see /lucid Step 5). Returns the generated text, or None on any failure - deliberately
@@ -1577,8 +1590,12 @@ def lucid():
 
                     print(f"[INFO /lucid] Calling OpenAI API (model: {model}). Payload keys: {list(data_payload.keys())}") # Vercel Log
 
-                    # Make the POST request to OpenAI with a timeout
-                    response_openai = requests.post(openai_url, headers=headers, json=data_payload, timeout=30)
+                    # Make the POST request to OpenAI with a timeout. 45s (was 30s) - gpt-5.6
+                    # spends invisible reasoning_tokens before any visible output and runs
+                    # measurably slower/more variable than gpt-4o; a timeout here isn't caught
+                    # locally, it propagates to the outer handler as a generic 500, which the
+                    # frontend shows as "couldn't be sent" - found live in production.
+                    response_openai = requests.post(openai_url, headers=headers, json=data_payload, timeout=45)
                     openai_status = response_openai.status_code
                     openai_response_text = response_openai.text # Get raw text for potential error logging
                     print(f"[INFO /lucid] OpenAI response status: {openai_status}") # Vercel Log
