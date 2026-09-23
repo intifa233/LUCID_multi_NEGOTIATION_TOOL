@@ -52,7 +52,7 @@ def call_openai(messages, api_key, model, temperature):
         'https://api.openai.com/v1/chat/completions',
         headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
         json={'model': model, 'messages': messages, 'temperature': temperature},
-        timeout=30
+        timeout=45  # matches lucid.py's /lucid endpoint - gpt-5.6 runs slower/more variable
     )
     if resp.status_code != 200:
         raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text[:500]}")
