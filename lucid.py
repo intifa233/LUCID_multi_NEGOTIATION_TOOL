@@ -433,6 +433,12 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
         return dict(empty_result)
 
 
+# The negotiation's total round count - matches the qsf's LUCIDRoundLimit embedded-data
+# value. lucid.py has no way to read that value itself (it isn't sent in the request body),
+# so this is kept in sync by hand; used only to prescribe final-round behavior (see the
+# round_note construction in /lucid) - if the qsf's round limit ever changes, update this too.
+TOTAL_ROUNDS = 10
+
 # --- Hold-firm enforcement (rounds 1-N, both conditions) ---
 # Shared by Prosocial and Proself - both prompts hold the same opening anchor and the
 # same "don't move Salary/Vacation Time in the first HOLD_FIRM_ROUNDS rounds" rule (see
@@ -1573,6 +1579,26 @@ def lucid():
                                     f"concession this specific round to justify it - pacing takes "
                                     f"priority here."
                                 )
+                    # Final-round prescription (both conditions) - the candidate gets no further
+                    # turn after this one, so a conditional trade proposed here ("if you accept X,
+                    # I'll do Y") can never actually be confirmed: the round limit is enforced by
+                    # the frontend before a next message ever reaches this endpoint, so an
+                    # acceptance like "ok deal" sent after this round is never processed at all -
+                    # found live in production (see the round-10 screenshot this note was added
+                    # for). Prescribing this rather than reacting to it after the fact, same
+                    # principle as the rest of this round-note block.
+                    if turn_number >= TOTAL_ROUNDS:
+                        round_note += (
+                            f" This is the FINAL round (round {turn_number} of {TOTAL_ROUNDS}) - the "
+                            f"candidate will not get another turn to respond after this one. Do NOT "
+                            f"propose a new conditional trade that would need their confirmation next "
+                            f"round (e.g. \"if you accept X, I'll do Y\") - there is no next round for "
+                            f"them to confirm it, and it would go unresolved. Present your definitive "
+                            f"final package instead: either hold your current position firmly, or if "
+                            f"you're willing to make one last move, apply it directly and "
+                            f"unconditionally in this reply's \"Current package\" recap - do not leave "
+                            f"anything pending on the candidate's acceptance."
+                        )
                     messages_for_api = messages + [{'role': 'system', 'content': round_note}]
                     if first_concession_note:
                         # Same ephemeral treatment as the round-number note above - fresh each call,

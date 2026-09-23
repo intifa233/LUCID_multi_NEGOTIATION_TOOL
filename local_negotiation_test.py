@@ -264,6 +264,20 @@ def main():
                         f"judge it appropriate, without needing a fresh concession this specific "
                         f"round to justify it - pacing takes priority here."
                     )
+        # Same final-round prescription as lucid.py's /lucid endpoint - the candidate gets no
+        # further turn after this one, so a conditional trade proposed here can never actually
+        # be confirmed.
+        if turn_number >= lucid.TOTAL_ROUNDS:
+            round_note += (
+                f" This is the FINAL round (round {turn_number} of {lucid.TOTAL_ROUNDS}) - the "
+                f"candidate will not get another turn to respond after this one. Do NOT propose "
+                f"a new conditional trade that would need their confirmation next round (e.g. "
+                f"\"if you accept X, I'll do Y\") - there is no next round for them to confirm "
+                f"it, and it would go unresolved. Present your definitive final package instead: "
+                f"either hold your current position firmly, or if you're willing to make one "
+                f"last move, apply it directly and unconditionally in this reply's \"Current "
+                f"package\" recap - do not leave anything pending on the candidate's acceptance."
+            )
         messages_for_api = messages + [{'role': 'system', 'content': round_note}]
 
         # --- Same Prosocial-only first-concession exception as lucid.py's /lucid endpoint.
