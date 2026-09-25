@@ -499,6 +499,10 @@ def main():
 
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
+        # Defaults so the Rule 3 mirror below can safely reference these even on a
+        # non-first-concession round.
+        grant_status = None
+        grant_info = None
         if first_concession_note_fired:
             # Excludes accepted_issue_id (mirrors lucid.py): if the exception fired via the
             # candidate accepting a trade the recruiter itself already promised, that issue
@@ -580,6 +584,15 @@ def main():
         if reciprocity_check.get('claims_reciprocity'):
             credited_issue_id = reciprocity_check.get('credited_issue_id')
             credited_value = reciprocity_check.get('credited_value')
+            # Mirrors lucid.py: cross-check against round_concession_check's OWN
+            # accepted_issue_id - if the classifier is crediting the candidate with that SAME
+            # issue, it's almost certainly the same directional misread (crediting the
+            # recruiter's own grant TO the candidate as if conceded FROM them), just in an
+            # implicit framing. Don't trust it.
+            if credited_issue_id and credited_issue_id == round_concession_check.get('accepted_issue_id'):
+                print(f"  [reciprocity claim ({credited_issue_id}->{credited_value}) matches this round's own accepted_issue_id - not trusting it]")
+                credited_issue_id = None
+                credited_value = None
             if credited_issue_id and credited_value:
                 credited_prior_by_id = {item['id']: item['status'] for item in current_statuses}
                 credited_prior_value = credited_prior_by_id.get(credited_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(credited_issue_id)
@@ -644,8 +657,8 @@ def main():
         #   2. pacing minimum: once at/past a pacing deadline, Salary/Vacation must still
         #      be at least at pacing_target. Also unconditional on first_concession_will_fire.
         #   3. no free concession: no OTHER issue may have moved in the candidate's favor
-        #      without a genuine concession this round - SKIPPED on a first-concession
-        #      round (its own safety net handles that specific issue).
+        #      without a genuine concession this round - runs on a first-concession round
+        #      too now, exempting only the CONFIRMED gift issue (not the whole round).
         # Rules 1/2 exist here IN ADDITION to the dedicated hold-firm/pacing safety nets
         # above (which only ever run once) because a LATER safety net's regeneration
         # (grant/reciprocity) can silently undo either fix - observed in testing for both.
@@ -676,41 +689,48 @@ def main():
                         label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
                         pc_violations.append((issue_id, label, target))
 
+            # Mirrors lucid.py: runs every round, including a first-concession round - used
+            # to be skipped entirely whenever first_concession_note_fired, but a LATER safety
+            # net's regeneration (reciprocity) can resample fresh and volunteer brand-new,
+            # completely ungrounded moves unrelated to the confirmed gift, and a blanket
+            # round-wide skip meant nothing would ever catch those.
             ug_moves = []
-            if not first_concession_will_fire:
-                already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
-                for item in lucid._default_issue_statuses():
-                    issue_id = item['id']
-                    if issue_id in already_flagged_ids:
-                        continue
-                    new_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                    old_val = prior_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
-                    if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                        continue  # didn't move in the candidate's favor
-                    pacing_step = pacing_target.get(issue_id)
-                    if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                        continue  # within what the pacing schedule itself mandates this round
-                    stretch_step = pacing_stretch_target.get(issue_id)
-                    if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                        continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
-                        # pacing takes priority in this window, not gated on a fresh concession
-                    # Mirrors lucid.py: a genuine concession / accepted prior offer only ever
-                    # justifies ONE specific issue moving for free, not every issue that moves
-                    # this round - narrowed to the classifier's own tied issue, or any issue
-                    # whose new value is actually mentioned in the reply's prose (not just the
-                    # recap table).
-                    if genuine_concession_this_round and (
-                        issue_id == round_concession_check.get('requested_issue_id')
-                        or lucid._value_mentioned_in_prose(reply, new_val)
-                    ):
-                        continue
-                    if round_concession_check.get('accepts_prior_offer') and (
-                        issue_id == round_concession_check.get('accepted_issue_id')
-                        or lucid._value_mentioned_in_prose(reply, new_val)
-                    ):
-                        continue  # candidate accepted a trade the recruiter itself already
-                        # proposed - not a free giveaway, it's the recruiter following through
-                    ug_moves.append((issue_id, item['label'], old_val))
+            already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
+            for item in lucid._default_issue_statuses():
+                issue_id = item['id']
+                if issue_id in already_flagged_ids:
+                    continue
+                new_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                old_val = prior_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                if lucid._compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                    continue  # didn't move in the candidate's favor
+                pacing_step = pacing_target.get(issue_id)
+                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                    continue  # within what the pacing schedule itself mandates this round
+                stretch_step = pacing_stretch_target.get(issue_id)
+                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                    continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
+                    # pacing takes priority in this window, not gated on a fresh concession
+                if first_concession_note_fired and grant_status == 'ok' and grant_info and issue_id == grant_info[0]:
+                    continue  # the CONFIRMED one-time first-concession gift issue this round -
+                    # already verified separately, not an ungrounded move
+                # Mirrors lucid.py: a genuine concession / accepted prior offer only ever
+                # justifies ONE specific issue moving for free, not every issue that moves
+                # this round - narrowed to the classifier's own tied issue, or any issue
+                # whose new value is actually mentioned in the reply's prose (not just the
+                # recap table).
+                if genuine_concession_this_round and (
+                    issue_id == round_concession_check.get('requested_issue_id')
+                    or lucid._value_mentioned_in_prose(reply, new_val)
+                ):
+                    continue
+                if round_concession_check.get('accepts_prior_offer') and (
+                    issue_id == round_concession_check.get('accepted_issue_id')
+                    or lucid._value_mentioned_in_prose(reply, new_val)
+                ):
+                    continue  # candidate accepted a trade the recruiter itself already
+                    # proposed - not a free giveaway, it's the recruiter following through
+                ug_moves.append((issue_id, item['label'], old_val))
 
             # Rule 4: same as lucid.py's /lucid endpoint - if the candidate accepted a
             # specific trade the recruiter itself promised last round, verify that exact
