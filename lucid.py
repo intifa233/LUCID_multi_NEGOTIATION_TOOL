@@ -2094,6 +2094,11 @@ def lucid():
                             # gift; this verifies the reply actually gave it - and gave no
                             # more than that - using the real payoff table rather than
                             # trusting the model followed through.
+                            # Defaults so _audit_final_state's Rule 3 below can safely reference
+                            # these even on a non-first-concession round (where the block below
+                            # never runs and never assigns them).
+                            grant_status = None
+                            grant_info = None
                             if first_concession_note:
                                 # Excludes accepted_issue_id from the "pick any other issue"
                                 # pool below: when the exception fired via the candidate
@@ -2203,6 +2208,22 @@ def lucid():
                             if reciprocity_check.get('claims_reciprocity'):
                                 credited_issue_id = reciprocity_check.get('credited_issue_id')
                                 credited_value = reciprocity_check.get('credited_value')
+                                # Cross-check against round_concession_check's OWN accepted_issue_id
+                                # - already independently grounded from the recruiter's PRIOR
+                                # message (see _detect_first_concession_llm), not read from this
+                                # reply. If the reciprocity classifier is crediting the candidate
+                                # with that SAME issue, it's almost certainly the same directional
+                                # misread this prompt was patched for before (crediting the
+                                # recruiter's OWN grant TO the candidate as if conceded FROM them) -
+                                # just in an implicit framing the earlier patch didn't cover (e.g.
+                                # "we have agreement on X in exchange for Y... I can also..." rather
+                                # than an explicit "since/because" sentence). Don't trust it: this
+                                # round's actual grant is already verified separately (Rule 4 /
+                                # _prior_offer_landed_status below), it isn't something to revert.
+                                if credited_issue_id and credited_issue_id == round_concession_check.get('accepted_issue_id'):
+                                    print(f"[INFO /lucid] Reciprocity claim ({credited_issue_id}->{credited_value}) matches this round's own accepted_issue_id - likely crediting the recruiter's own already-promised grant back to the candidate, not trusting it") # Vercel Log
+                                    credited_issue_id = None
+                                    credited_value = None
                                 if credited_issue_id and credited_value:
                                     credited_prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
                                     credited_prior_value = credited_prior_by_id.get(credited_issue_id) or RECRUITER_OPENING_OFFER.get(credited_issue_id)
@@ -2323,53 +2344,66 @@ def lucid():
                                             label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
                                             pc_violations.append((issue_id, label, target))
 
-                                # Rule 3: no free concession - skipped entirely on a first-
-                                # concession round (see note above); skips issues already
-                                # flagged by rule 1/2 to avoid double-flagging.
+                                # Rule 3: no free concession - runs every round, including a
+                                # first-concession round (see note above): used to be skipped
+                                # entirely whenever first_concession_note was set, on the
+                                # assumption that round's one free move was always exactly the
+                                # confirmed gift issue - but found live that a LATER safety net's
+                                # own regeneration (triggered by something unrelated, e.g. the
+                                # reciprocity-claim check) can resample fresh and volunteer
+                                # brand-new, completely ungrounded moves on OTHER issues (a real
+                                # case: Vacation Time and Bonus both moved with zero justification
+                                # in a regenerated draft, entirely unrelated to the actual
+                                # first-concession gift), and a blanket round-wide skip meant
+                                # nothing would ever catch those. Skips issues already flagged by
+                                # rule 1/2 to avoid double-flagging.
                                 ug_moves = []
-                                if not first_concession_note:
-                                    already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
-                                    for item in _default_issue_statuses():
-                                        issue_id = item['id']
-                                        if issue_id in already_flagged_ids:
-                                            continue
-                                        new_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                        old_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
-                                        if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
-                                            continue  # didn't move in the candidate's favor
-                                        pacing_step = pacing_target.get(issue_id)
-                                        if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
-                                            continue  # within what the pacing schedule itself mandates this round
-                                        stretch_step = pacing_stretch_target.get(issue_id)
-                                        if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                                            continue  # within Prosocial's optional stretch ceiling (rounds
-                                            # 8-10 only - pacing_stretch_target is None everywhere else) -
-                                            # pacing takes priority in this window, not gated on a fresh
-                                            # concession this specific round
-                                        # A genuine concession or an accepted prior offer only ever
-                                        # justifies ONE specific issue moving for free - not a blanket
-                                        # pass for every issue that happens to move this round. Found
-                                        # live: a real moving-expense-for-salary trade correctly
-                                        # exempted Salary, but the same blanket flag also silently let
-                                        # Bonus jump from 4% to 6% with zero mention anywhere in the
-                                        # text. Exempt this issue only if it's the one the round's
-                                        # classifier actually ties to the trade, OR the reply's own
-                                        # prose names it (the recruiter reciprocating on a DIFFERENT
-                                        # issue than requested is legitimate per prompts.yaml, but
-                                        # should be narrated, not slipped into the recap silently).
-                                        if genuine_concession_this_round and (
-                                            issue_id == round_concession_check.get('requested_issue_id')
-                                            or _value_mentioned_in_prose(generated_text, new_val)
-                                        ):
-                                            continue
-                                        if round_concession_check.get('accepts_prior_offer') and (
-                                            issue_id == round_concession_check.get('accepted_issue_id')
-                                            or _value_mentioned_in_prose(generated_text, new_val)
-                                        ):
-                                            continue  # candidate accepted a trade the recruiter itself
-                                            # already proposed - not a free giveaway, it's the
-                                            # recruiter following through on its own prior offer
-                                        ug_moves.append((issue_id, item['label'], old_val))
+                                already_flagged_ids = {v[0] for v in hf_violations} | {v[0] for v in pc_violations}
+                                for item in _default_issue_statuses():
+                                    issue_id = item['id']
+                                    if issue_id in already_flagged_ids:
+                                        continue
+                                    new_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    old_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    if _compare_recruiter_value(issue_id, new_val, old_val) != 'worse':
+                                        continue  # didn't move in the candidate's favor
+                                    pacing_step = pacing_target.get(issue_id)
+                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                                        continue  # within what the pacing schedule itself mandates this round
+                                    stretch_step = pacing_stretch_target.get(issue_id)
+                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                        continue  # within Prosocial's optional stretch ceiling (rounds
+                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
+                                        # pacing takes priority in this window, not gated on a fresh
+                                        # concession this specific round
+                                    if first_concession_note and grant_status == 'ok' and grant_info and issue_id == grant_info[0]:
+                                        continue  # the CONFIRMED one-time first-concession gift
+                                        # issue for this round - already verified separately by the
+                                        # grant-status check above, not an ungrounded move
+                                    # A genuine concession or an accepted prior offer only ever
+                                    # justifies ONE specific issue moving for free - not a blanket
+                                    # pass for every issue that happens to move this round. Found
+                                    # live: a real moving-expense-for-salary trade correctly
+                                    # exempted Salary, but the same blanket flag also silently let
+                                    # Bonus jump from 4% to 6% with zero mention anywhere in the
+                                    # text. Exempt this issue only if it's the one the round's
+                                    # classifier actually ties to the trade, OR the reply's own
+                                    # prose names it (the recruiter reciprocating on a DIFFERENT
+                                    # issue than requested is legitimate per prompts.yaml, but
+                                    # should be narrated, not slipped into the recap silently).
+                                    if genuine_concession_this_round and (
+                                        issue_id == round_concession_check.get('requested_issue_id')
+                                        or _value_mentioned_in_prose(generated_text, new_val)
+                                    ):
+                                        continue
+                                    if round_concession_check.get('accepts_prior_offer') and (
+                                        issue_id == round_concession_check.get('accepted_issue_id')
+                                        or _value_mentioned_in_prose(generated_text, new_val)
+                                    ):
+                                        continue  # candidate accepted a trade the recruiter itself
+                                        # already proposed - not a free giveaway, it's the
+                                        # recruiter following through on its own prior offer
+                                    ug_moves.append((issue_id, item['label'], old_val))
 
                                 # Rule 4: if the candidate accepted a specific trade the
                                 # recruiter itself promised last round (per
