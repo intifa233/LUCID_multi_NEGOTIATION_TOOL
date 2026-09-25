@@ -660,9 +660,20 @@ def main():
                     if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
                         continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
                         # pacing takes priority in this window, not gated on a fresh concession
-                    if genuine_concession_this_round:
-                        continue  # a real concession happened - some reciprocal movement is expected
-                    if round_concession_check.get('accepts_prior_offer'):
+                    # Mirrors lucid.py: a genuine concession / accepted prior offer only ever
+                    # justifies ONE specific issue moving for free, not every issue that moves
+                    # this round - narrowed to the classifier's own tied issue, or any issue
+                    # whose new value is actually mentioned in the reply's prose (not just the
+                    # recap table).
+                    if genuine_concession_this_round and (
+                        issue_id == round_concession_check.get('requested_issue_id')
+                        or lucid._value_mentioned_in_prose(reply, new_val)
+                    ):
+                        continue
+                    if round_concession_check.get('accepts_prior_offer') and (
+                        issue_id == round_concession_check.get('accepted_issue_id')
+                        or lucid._value_mentioned_in_prose(reply, new_val)
+                    ):
                         continue  # candidate accepted a trade the recruiter itself already
                         # proposed - not a free giveaway, it's the recruiter following through
                     ug_moves.append((issue_id, item['label'], old_val))
