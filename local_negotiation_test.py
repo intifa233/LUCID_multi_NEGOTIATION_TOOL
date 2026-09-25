@@ -769,6 +769,15 @@ def main():
                 old_val = prior_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
                 if new_val == old_val:
                     continue  # nothing actually changed on this issue - nothing to revert
+                # Mirrors lucid.py: if this move doesn't go beyond what the recruiter's OWN
+                # concession schedule already mandates by this round, it isn't something the
+                # candidate needs to confirm - same exemption Rule 3 already uses.
+                pacing_step = pacing_target.get(issue_id)
+                if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                    continue
+                stretch_step = pacing_stretch_target.get(issue_id)
+                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                    continue
                 uc_label = next(
                     (item['label'] for item in lucid._default_issue_statuses() if item['id'] == issue_id),
                     issue_id
