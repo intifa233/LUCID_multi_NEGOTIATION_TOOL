@@ -126,7 +126,8 @@ def main():
         genuine_concession_value = None
         round_concession_check = {'is_concession': False, 'requested_issue_id': None,
                                    'conceded_issue_id': None, 'conceded_new_value': None,
-                                   'accepts_prior_offer': False}
+                                   'accepts_prior_offer': False, 'accepted_issue_id': None,
+                                   'accepted_value': None}
         # Ground the classifier with the recruiter's full current package (falling back to
         # RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate message
         # like "I can take a later start date" gets extracted as the concrete value actually
@@ -238,6 +239,10 @@ def main():
             condition_key == 'prosocial' and not first_concession_used and genuine_concession_this_round
         )
         if not first_concession_will_fire:
+            # Independent checks, not mutually exclusive - a single message can both concede
+            # something new AND accept a trade the recruiter proposed last round. Both notes
+            # get appended when both are true - same as lucid.py's /lucid endpoint.
+            noted_something = False
             if genuine_concession_this_round:
                 round_note += (
                     f" The candidate genuinely conceded on {genuine_concession_label} this round "
@@ -246,7 +251,8 @@ def main():
                     f"on AT MOST ONE other issue in this reply - do not move anything beyond that "
                     f"without further justification."
                 )
-            elif round_concession_check.get('accepts_prior_offer'):
+                noted_something = True
+            if round_concession_check.get('accepts_prior_offer'):
                 # Same as lucid.py's /lucid endpoint: the candidate's message doesn't concede
                 # anything new itself, but it IS accepting a conditional trade the recruiter
                 # proposed in its own previous reply - grounds to follow through, not to hold back.
@@ -259,7 +265,8 @@ def main():
                     "previous reply did NOT actually name a specific conditional trade, treat "
                     "this the same as no genuine concession this round instead."
                 )
-            else:
+                noted_something = True
+            if not noted_something:
                 round_note += (
                     " The candidate did NOT make a genuine concession this round (per your "
                     "payoff schedule) - per your negotiation protocol, you may NOT move any issue "
@@ -656,13 +663,40 @@ def main():
                         continue  # candidate accepted a trade the recruiter itself already
                         # proposed - not a free giveaway, it's the recruiter following through
                     ug_moves.append((issue_id, item['label'], old_val))
-            return hf_violations, pc_violations, ug_moves
 
-        hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+            # Rule 4: same as lucid.py's /lucid endpoint - if the candidate accepted a
+            # specific trade the recruiter itself promised last round, verify that exact
+            # value actually landed, not just that nothing moved for free.
+            po_violations = []
+            accepted_issue_id = round_concession_check.get('accepted_issue_id')
+            accepted_value = round_concession_check.get('accepted_value')
+            if accepted_issue_id and accepted_value:
+                po_status, po_actual = lucid._prior_offer_landed_status(
+                    current_assistant_updates, accepted_issue_id, accepted_value, reply
+                )
+                if po_status in ('under', 'missing'):
+                    po_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == accepted_issue_id),
+                        accepted_issue_id
+                    )
+                    po_violations.append((accepted_issue_id, po_label, accepted_value))
+
+            return hf_violations, pc_violations, ug_moves, po_violations
+
+        hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
         final_audit_attempts = 0
-        while (hold_firm_violations or pacing_violations or ungrounded_moves) and final_audit_attempts < 2:
+        while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations) and final_audit_attempts < 2:
             final_audit_attempts += 1
             note_parts = []
+            if prior_offer_violations:
+                targets_desc = ', '.join(f"{label} to exactly {value}" for _, label, value in prior_offer_violations)
+                print(f"  [promised trade didn't land in the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
+                note_parts.append(
+                    f"the candidate accepted the conditional trade you proposed in your "
+                    f"own previous message, but your draft reply still doesn't reflect it "
+                    f"- set {targets_desc} in this reply's \"Current package\" recap, "
+                    f"unconditionally, exactly as you promised"
+                )
             if ungrounded_moves:
                 targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
                 print(f"  [ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
@@ -705,13 +739,14 @@ def main():
                 break
             reply = retry_text
             assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-            hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
 
-        if hold_firm_violations or pacing_violations or ungrounded_moves:
+        if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations:
             still_bad = (
                 [label for _, label, _ in hold_firm_violations]
                 + [label for _, label, _ in pacing_violations]
                 + [label for _, label, _ in ungrounded_moves]
+                + [label for _, label, _ in prior_offer_violations]
             )
             print(f"  [still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again]")
 

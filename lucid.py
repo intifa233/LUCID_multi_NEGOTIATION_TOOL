@@ -243,14 +243,26 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     freebie the candidate was fishing for. Distinct from is_concession: a message can accept a
     prior offer without conceding anything new itself.
 
+    accepted_issue_id/accepted_value (only meaningful when accepts_prior_offer is true)
+    extract WHAT the recruiter's own preceding message actually promised - the specific
+    issue and value on the recruiter's side of that trade (e.g. the recruiter said "I'll
+    raise the bonus to 6%", not what the candidate gave up for it) - piggybacked onto this
+    same call since prior_assistant_message is already being read for accepts_prior_offer.
+    Used by the caller to deterministically verify the promised trade actually landed in
+    the reply that follows, rather than trusting the round-note prescription alone (see
+    _prior_offer_landed_status) - the same "prescribe AND verify" pattern used everywhere
+    else in this file, closing the gap where a later safety net's regeneration could
+    otherwise silently drop what was promised with nothing checking it actually shipped.
+
     Returns {'is_concession': False, 'requested_issue_id': None, 'conceded_issue_id': None,
-    'conceded_new_value': None, 'accepts_prior_offer': False} on any failure, or if no
-    message/key was given, so this never blocks the main call.
+    'conceded_new_value': None, 'accepts_prior_offer': False, 'accepted_issue_id': None,
+    'accepted_value': None} on any failure, or if no message/key was given, so this never
+    blocks the main call.
     """
     empty_result = {
         'is_concession': False, 'requested_issue_id': None,
         'conceded_issue_id': None, 'conceded_new_value': None,
-        'accepts_prior_offer': False
+        'accepts_prior_offer': False, 'accepted_issue_id': None, 'accepted_value': None
     }
     if not user_message or not openai_api_key:
         return dict(empty_result)
@@ -304,13 +316,22 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         "Return ONLY valid JSON in this exact shape: "
         "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\", "
         "\"conceded_issue_id\": \"issue-4\", \"conceded_new_value\": \"July 1\", "
-        "\"accepts_prior_offer\": false}. "
+        "\"accepts_prior_offer\": false, \"accepted_issue_id\": null, "
+        "\"accepted_value\": null}. "
         "requested_issue_id is the issue the candidate is asking the RECRUITER to move on "
         "or improve - use null if is_concession is false or the requested issue is unclear. "
         "conceded_issue_id/conceded_new_value describe what the candidate is giving ground "
         "on: the issue, and the specific concrete new value they're now offering on it (e.g. "
         "'July 1', 'Division C', '80%') - not a description. Use null for both if "
-        "is_concession is false or this is unclear."
+        "is_concession is false or this is unclear. "
+        "accepted_issue_id/accepted_value describe the SPECIFIC issue and value the RECRUITER "
+        "itself promised in its preceding message that the candidate is now accepting (e.g. "
+        "if the recruiter's preceding message was 'if you accept X, I'll raise the bonus to "
+        "6%', and the candidate accepts, accepted_issue_id is issue-1 and accepted_value is "
+        "'6%' - the thing the RECRUITER offered to give, not what the candidate gave up for "
+        "it). Use null for both if accepts_prior_offer is false, or if the recruiter's "
+        "preceding message didn't name one specific concrete value for its own side of the "
+        "trade."
         + current_offer_note
         + prior_offer_note
     )
@@ -356,12 +377,19 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         conceded_new_value = parsed.get('conceded_new_value')
         conceded_new_value = str(conceded_new_value).strip() if conceded_new_value else None
         accepts_prior_offer = bool(parsed.get('accepts_prior_offer'))
+        accepted_issue_id = parsed.get('accepted_issue_id')
+        if accepted_issue_id not in valid_issue_ids:
+            accepted_issue_id = None
+        accepted_value = parsed.get('accepted_value')
+        accepted_value = str(accepted_value).strip() if accepted_value else None
         return {
             'is_concession': is_concession,
             'requested_issue_id': requested_issue_id,
             'conceded_issue_id': conceded_issue_id,
             'conceded_new_value': conceded_new_value,
-            'accepts_prior_offer': accepts_prior_offer
+            'accepts_prior_offer': accepts_prior_offer,
+            'accepted_issue_id': accepted_issue_id,
+            'accepted_value': accepted_value
         }
 
     except Exception as e:
@@ -408,6 +436,14 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
         "offer X'). That is the recruiter proposing their OWN future move, not a claim that "
         "the candidate already conceded anything - mark claims_reciprocity false for these, "
         "even if a specific value is mentioned. "
+        "CRITICAL: when a sentence has the shape 'since/because you did/accepted A, I will do "
+        "B', credited_issue_id/credited_value describe A - what the CANDIDATE is being said to "
+        "have already given up or accepted - NEVER B, which is the recruiter's OWN reciprocal "
+        "action being granted TO the candidate, not something credited FROM the candidate. For "
+        "example, in 'Since you accepted 60% moving expense coverage, I'll raise the bonus to "
+        "6%', the candidate is credited with the 60% moving coverage (issue-5) - the 6% bonus "
+        "(issue-1) is the recruiter's own grant and must NEVER be used as credited_issue_id/"
+        "credited_value, no matter how confidently or specifically it's stated. "
         "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
         "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
         "Coverage, issue-7 Salary, issue-8 Location. "
@@ -763,6 +799,51 @@ def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updat
         print(f"[INFO /lucid] Extraction dropped {target_issue_id} entirely - recovered via recap regex fallback: {patched_updates[target_issue_id]!r}") # Vercel Log
         return patched_status, patched_info, patched_note, patched_updates
     return status, info, note, assistant_updates
+
+
+def _prior_offer_landed_status(assistant_updates, accepted_issue_id, accepted_value, raw_text=None):
+    """
+    Verifies that a specific value the recruiter promised in its own prior conditional offer
+    - which the candidate has now accepted, per _detect_first_concession_llm's
+    accepted_issue_id/accepted_value - actually landed in THIS round's reply, rather than
+    trusting the round-note prescription alone. Closes a real gap found in testing: the
+    prescription can tell the model to apply the trade, but a LATER safety net's own
+    regeneration (sampling fresh from stale context, not editing the current draft) can
+    silently drop it while fixing something unrelated - nothing else re-checks that the
+    specific promised value actually shipped, only that nothing moved for free.
+
+    Same regex-fallback trick as _first_concession_grant_status_with_fallback: if
+    assistant_updates is missing the issue entirely, fall back to a plain line match against
+    raw_text's recap before giving up - no extra LLM call.
+
+    Returns (status, actual_value):
+      ('na', None)      - accepted_issue_id/accepted_value weren't given (nothing to verify)
+      ('ok', value)      - the issue landed at exactly the promised value, or something even
+                           more favorable to the candidate (over-delivering isn't a violation)
+      ('under', value)   - landed, but at a value WORSE for the candidate than promised
+      ('missing', None)  - the issue never showed up in assistant_updates or the recap at all
+      ('unknown', value) - landed at some value, but direction against the promise couldn't
+                           be verified either way (matching this file's usual "unknown ->
+                           don't force a regen on ambiguity" handling elsewhere)
+    """
+    if not accepted_issue_id or not accepted_value:
+        return 'na', None
+    actual_value = assistant_updates.get(accepted_issue_id)
+    if not actual_value and raw_text:
+        label = next((item['label'] for item in _default_issue_statuses() if item['id'] == accepted_issue_id), None)
+        if label:
+            cleaned = str(raw_text).replace('**', '')
+            matches = re.findall(rf'{re.escape(label)}\s*:\s*([^\n]+)', cleaned, flags=re.IGNORECASE)
+            if matches:
+                actual_value = matches[-1].strip()
+    if not actual_value:
+        return 'missing', None
+    direction = _compare_recruiter_value(accepted_issue_id, actual_value, accepted_value)
+    if direction in ('same', 'worse'):  # matches the promise, or over-delivers - both fine
+        return 'ok', actual_value
+    if direction == 'unknown':
+        return 'unknown', actual_value
+    return 'under', actual_value  # 'better' for the recruiter than promised = under-delivered
 
 
 # --- Round-based concession pacing targets (both conditions) ---
@@ -1582,6 +1663,16 @@ def lucid():
                     # first-concession exception is already granting something this round - that's
                     # its own, separately-instructed exception and this note would contradict it.
                     if not first_concession_note:
+                        # Independent checks, not mutually exclusive - a single message can
+                        # both concede something new AND accept a trade the recruiter proposed
+                        # last round (e.g. "the 60% moving trade is good, and I can also do
+                        # August 1 if you improve vacation"). Both notes get appended when both
+                        # are true, so the model isn't only told about one and left to guess
+                        # about the other - found this could otherwise happen: the classifier
+                        # sometimes reads "accepting a trade that lowers the candidate's own
+                        # value" as itself a concession, so genuine_concession_this_round and
+                        # accepts_prior_offer can both be true from the same message.
+                        noted_something = False
                         if genuine_concession_this_round:
                             round_note += (
                                 f" The candidate genuinely conceded on {genuine_concession_label} "
@@ -1591,7 +1682,8 @@ def lucid():
                                 f"this reply - do not move anything beyond that without further "
                                 f"justification."
                             )
-                        elif round_concession_check.get('accepts_prior_offer'):
+                            noted_something = True
+                        if round_concession_check.get('accepts_prior_offer'):
                             # Found live in production: the candidate's message (e.g. "ok deal")
                             # doesn't itself concede anything new, so genuine_concession_this_round
                             # is correctly false here - but it IS accepting a conditional trade the
@@ -1607,7 +1699,8 @@ def lucid():
                                 "reply did NOT actually name a specific conditional trade, treat "
                                 "this the same as no genuine concession this round instead."
                             )
-                        else:
+                            noted_something = True
+                        if not noted_something:
                             round_note += (
                                 " The candidate did NOT make a genuine concession this round (per "
                                 "your payoff schedule) - per your negotiation protocol, you may NOT "
@@ -2045,13 +2138,46 @@ def lucid():
                                             # already proposed - not a free giveaway, it's the
                                             # recruiter following through on its own prior offer
                                         ug_moves.append((issue_id, item['label'], old_val))
-                                return hf_violations, pc_violations, ug_moves
 
-                            hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+                                # Rule 4: if the candidate accepted a specific trade the
+                                # recruiter itself promised last round (per
+                                # round_concession_check's accepted_issue_id/accepted_value),
+                                # verify that exact value actually landed - the other three
+                                # rules only ever check "did something move for FREE", never
+                                # "did something PROMISED actually ship". Found in testing: a
+                                # safety net elsewhere in this round can regenerate from stale
+                                # context and silently drop the promised value while fixing
+                                # something unrelated, and nothing else catches that.
+                                po_violations = []
+                                accepted_issue_id = round_concession_check.get('accepted_issue_id')
+                                accepted_value = round_concession_check.get('accepted_value')
+                                if accepted_issue_id and accepted_value:
+                                    po_status, po_actual = _prior_offer_landed_status(
+                                        current_assistant_updates, accepted_issue_id, accepted_value, generated_text
+                                    )
+                                    if po_status in ('under', 'missing'):
+                                        po_label = next(
+                                            (item['label'] for item in _default_issue_statuses() if item['id'] == accepted_issue_id),
+                                            accepted_issue_id
+                                        )
+                                        po_violations.append((accepted_issue_id, po_label, accepted_value))
+
+                                return hf_violations, pc_violations, ug_moves, po_violations
+
+                            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
                             final_audit_attempts = 0
-                            while (hold_firm_violations or pacing_violations or ungrounded_moves) and final_audit_attempts < 2:
+                            while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations) and final_audit_attempts < 2:
                                 final_audit_attempts += 1
                                 note_parts = []
+                                if prior_offer_violations:
+                                    targets_desc = ', '.join(f"{label} to exactly {value}" for _, label, value in prior_offer_violations)
+                                    print(f"[WARN /lucid] Promised trade didn't land in the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
+                                    note_parts.append(
+                                        f"the candidate accepted the conditional trade you proposed in "
+                                        f"your own previous message, but your draft reply still doesn't "
+                                        f"reflect it - set {targets_desc} in this reply's \"Current "
+                                        f"package\" recap, unconditionally, exactly as you promised"
+                                    )
                                 if ungrounded_moves:
                                     targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in ungrounded_moves)
                                     print(f"[WARN /lucid] Ungrounded free concession(s) with no genuine candidate concession this round ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
@@ -2096,13 +2222,14 @@ def lucid():
                                 assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
                                 # Full re-audit, not just a recheck of the issues flagged above -
                                 # this is what catches a regeneration volunteering a NEW violation.
-                                hold_firm_violations, pacing_violations, ungrounded_moves = _audit_final_state(assistant_updates)
+                                hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
 
-                            if hold_firm_violations or pacing_violations or ungrounded_moves:
+                            if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations:
                                 still_bad = (
                                     [label for _, label, _ in hold_firm_violations]
                                     + [label for _, label, _ in pacing_violations]
                                     + [label for _, label, _ in ungrounded_moves]
+                                    + [label for _, label, _ in prior_offer_violations]
                                 )
                                 print(f"[WARN /lucid] Still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again") # Vercel Log
 
