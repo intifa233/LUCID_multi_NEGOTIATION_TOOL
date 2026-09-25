@@ -306,15 +306,31 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
     else in this file, closing the gap where a later safety net's regeneration could
     otherwise silently drop what was promised with nothing checking it actually shipped.
 
+    accepted_counterpart_issue_id/accepted_counterpart_value (also only meaningful when
+    accepts_prior_offer is true) extract the OTHER side of that same trade - what the
+    RECRUITER's preceding message asked the CANDIDATE to give up/accept in exchange (e.g.
+    if the recruiter said "I can offer July 1 in exchange for Division A", accepted_value
+    is 'July 1' (issue-4, what the candidate gets) and accepted_counterpart_value is
+    'Division A' (issue-2, what the candidate gives up). Used by the caller to verify,
+    when the candidate merely ACCEPTS a trade the recruiter itself proposed rather than
+    volunteering a fresh concession, whether they're genuinely paying real value for it -
+    found live: a candidate accepting "Division A for July 1" pays a real, payoff-table-
+    verifiable cost, but is_concession alone never catches this (the classifier correctly
+    reads pure acceptance as not a fresh concession), so without this the Prosocial
+    one-time first-concession gift could never fire in a negotiation where the recruiter
+    always proposes the specific trade and the candidate only ever confirms it.
+
     Returns {'is_concession': False, 'requested_issue_id': None, 'conceded_issue_id': None,
     'conceded_new_value': None, 'accepts_prior_offer': False, 'accepted_issue_id': None,
-    'accepted_value': None} on any failure, or if no message/key was given, so this never
-    blocks the main call.
+    'accepted_value': None, 'accepted_counterpart_issue_id': None,
+    'accepted_counterpart_value': None} on any failure, or if no message/key was given, so
+    this never blocks the main call.
     """
     empty_result = {
         'is_concession': False, 'requested_issue_id': None,
         'conceded_issue_id': None, 'conceded_new_value': None,
-        'accepts_prior_offer': False, 'accepted_issue_id': None, 'accepted_value': None
+        'accepts_prior_offer': False, 'accepted_issue_id': None, 'accepted_value': None,
+        'accepted_counterpart_issue_id': None, 'accepted_counterpart_value': None
     }
     if not user_message or not openai_api_key:
         return dict(empty_result)
@@ -369,7 +385,8 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         "{\"is_concession\": true, \"requested_issue_id\": \"issue-6\", "
         "\"conceded_issue_id\": \"issue-4\", \"conceded_new_value\": \"July 1\", "
         "\"accepts_prior_offer\": false, \"accepted_issue_id\": null, "
-        "\"accepted_value\": null}. "
+        "\"accepted_value\": null, \"accepted_counterpart_issue_id\": null, "
+        "\"accepted_counterpart_value\": null}. "
         "requested_issue_id is the issue the candidate is asking the RECRUITER to move on "
         "or improve - use null if is_concession is false or the requested issue is unclear. "
         "conceded_issue_id/conceded_new_value describe what the candidate is giving ground "
@@ -383,7 +400,18 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         "'6%' - the thing the RECRUITER offered to give, not what the candidate gave up for "
         "it). Use null for both if accepts_prior_offer is false, or if the recruiter's "
         "preceding message didn't name one specific concrete value for its own side of the "
-        "trade."
+        "trade. "
+        "accepted_counterpart_issue_id/accepted_counterpart_value describe the OTHER side of "
+        "that SAME trade - the specific issue and value the recruiter's preceding message "
+        "asked the CANDIDATE to give up or accept in return (e.g. if the recruiter's "
+        "preceding message was 'I can offer a July 1 start if you accept Division A instead "
+        "of Division B', accepted_issue_id/accepted_value is issue-4/'July 1' (what the "
+        "candidate gets) and accepted_counterpart_issue_id/accepted_counterpart_value is "
+        "issue-2/'Division A' (what the candidate gives up) - the candidate's own accepting "
+        "message doesn't need to repeat this value itself, it's read from the recruiter's "
+        "preceding message, same as accepted_issue_id/accepted_value). Use null for both if "
+        "accepts_prior_offer is false, or if the recruiter's preceding message was a one-"
+        "sided offer with nothing named on the candidate's side."
         + current_offer_note
         + prior_offer_note
     )
@@ -434,6 +462,11 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
             accepted_issue_id = None
         accepted_value = parsed.get('accepted_value')
         accepted_value = str(accepted_value).strip() if accepted_value else None
+        accepted_counterpart_issue_id = parsed.get('accepted_counterpart_issue_id')
+        if accepted_counterpart_issue_id not in valid_issue_ids:
+            accepted_counterpart_issue_id = None
+        accepted_counterpart_value = parsed.get('accepted_counterpart_value')
+        accepted_counterpart_value = str(accepted_counterpart_value).strip() if accepted_counterpart_value else None
         return {
             'is_concession': is_concession,
             'requested_issue_id': requested_issue_id,
@@ -441,7 +474,9 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
             'conceded_new_value': conceded_new_value,
             'accepts_prior_offer': accepts_prior_offer,
             'accepted_issue_id': accepted_issue_id,
-            'accepted_value': accepted_value
+            'accepted_value': accepted_value,
+            'accepted_counterpart_issue_id': accepted_counterpart_issue_id,
+            'accepted_counterpart_value': accepted_counterpart_value
         }
 
     except Exception as e:
@@ -760,13 +795,21 @@ def _one_level_step(issue_id, current_value):
     return sorted_options[idx - 1][0]
 
 
-def _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id):
+def _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id, exclude_issue_id=None):
     """
     Evaluates a first-concession grant note (see /lucid Step 3) against the one-level cap
     (see _one_level_step - the grant is unconditional but capped to a single grid step, never
     jumped straight to the candidate's full ask). If target_issue_id is given, only that issue
     counts (the model was told exactly which one to grant); otherwise any of the six non-
-    Salary/Vacation issues counts (the model had a free choice among them).
+    Salary/Vacation issues counts (the model had a free choice among them) - EXCEPT
+    exclude_issue_id, if given: an issue already being fulfilled this round as part of an
+    existing promise (round_concession_check's accepted_issue_id, when the first-concession
+    trigger itself came from accepting that same trade - see the accepted_counterpart_*
+    path in /lucid Step 3) rather than something extra. Found live: without this, a
+    candidate accepting "Division A for July 1" got the July 1 date it was ALREADY promised
+    double-credited as the one-time gift too, since it's the only issue that moved in the
+    candidate's favor this round in the generic "any of the six alternates" scan - the gift
+    needs to be something genuinely additional, not the trade that was already happening.
 
     Returns a 3-tuple (status, info, unverified_note):
       ('ok', (issue_id, value), None)       - some eligible issue was CONFIRMED to move exactly
@@ -786,7 +829,8 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
     """
     prior_by_id = {item['id']: item.get('status', '') for item in prior_statuses}
     candidate_ids = [target_issue_id] if target_issue_id else [
-        item['id'] for item in _default_issue_statuses() if item['id'] not in ('issue-3', 'issue-7')
+        item['id'] for item in _default_issue_statuses()
+        if item['id'] not in ('issue-3', 'issue-7') and item['id'] != exclude_issue_id
     ]
     unknown_match = None
     overshoot = None
@@ -815,7 +859,7 @@ def _first_concession_grant_status(prior_statuses, assistant_updates, target_iss
     return ('missing', None, None)
 
 
-def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updates, target_issue_id, raw_text):
+def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updates, target_issue_id, raw_text, exclude_issue_id=None):
     """
     Wraps _first_concession_grant_status with one deterministic recovery attempt: if the
     result is 'missing' specifically because target_issue_id is absent from assistant_updates
@@ -829,12 +873,15 @@ def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updat
     which single issue to look for (the model was told exactly which one to grant), a plain
     line match is enough - no need to trust another LLM call to get it right either.
 
+    exclude_issue_id is passed straight through to _first_concession_grant_status (see there)
+    - only relevant when target_issue_id is None.
+
     Returns (status, info, unverified_note, assistant_updates) - assistant_updates comes
     back unchanged unless the fallback recovers a value AND that recovery confirms status
     'ok', in which case a patched copy is returned so the recovered value also feeds forward
     into this round's issue-status tracking, not just this one check.
     """
-    status, info, note = _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id)
+    status, info, note = _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id, exclude_issue_id)
     if status != 'missing' or not target_issue_id or target_issue_id in assistant_updates:
         return status, info, note, assistant_updates
     label = next((item['label'] for item in _default_issue_statuses() if item['id'] == target_issue_id), None)
@@ -846,7 +893,7 @@ def _first_concession_grant_status_with_fallback(prior_statuses, assistant_updat
         return status, info, note, assistant_updates
     patched_updates = dict(assistant_updates)
     patched_updates[target_issue_id] = matches[-1].strip()
-    patched_status, patched_info, patched_note = _first_concession_grant_status(prior_statuses, patched_updates, target_issue_id)
+    patched_status, patched_info, patched_note = _first_concession_grant_status(prior_statuses, patched_updates, target_issue_id, exclude_issue_id)
     if patched_status == 'ok':
         print(f"[INFO /lucid] Extraction dropped {target_issue_id} entirely - recovered via recap regex fallback: {patched_updates[target_issue_id]!r}") # Vercel Log
         return patched_status, patched_info, patched_note, patched_updates
@@ -1525,7 +1572,9 @@ def lucid():
                     round_concession_check = {
                         'is_concession': False, 'requested_issue_id': None,
                         'conceded_issue_id': None, 'conceded_new_value': None,
-                        'accepts_prior_offer': False
+                        'accepts_prior_offer': False, 'accepted_issue_id': None,
+                        'accepted_value': None, 'accepted_counterpart_issue_id': None,
+                        'accepted_counterpart_value': None
                     }
                     if latest_user_message:
                         # Fill in RECRUITER_OPENING_OFFER for any issue prior_issue_statuses
@@ -1566,6 +1615,45 @@ def lucid():
                                     f"but didn't name a specific conceded issue/value to verify against the "
                                     f"payoff table."
                                 )
+
+                        # Accepting a trade the RECRUITER itself proposed can also be a
+                        # genuine concession - the candidate is still paying real value, just
+                        # for a number the recruiter named first rather than one they proposed
+                        # themselves. Found live: a candidate who only ever confirms trades
+                        # the recruiter initiates ("okay, I can accept Division A") never
+                        # trips is_concession (correctly - they didn't volunteer anything), so
+                        # without this check genuine_concession_this_round - and therefore
+                        # Prosocial's one-time first-concession gift - could never fire in a
+                        # negotiation shaped that way. Only counts if not already confirmed
+                        # genuine above, and only when the recruiter's own prior message named
+                        # a real, payoff-table-verifiable cost on the candidate's side (not
+                        # just what the candidate receives).
+                        if not genuine_concession_this_round and round_concession_check.get('accepts_prior_offer'):
+                            counterpart_issue_id = round_concession_check.get('accepted_counterpart_issue_id')
+                            counterpart_value = round_concession_check.get('accepted_counterpart_value')
+                            if counterpart_issue_id and counterpart_value:
+                                prior_by_id_cp = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                                counterpart_prior_value = prior_by_id_cp.get(counterpart_issue_id) or RECRUITER_OPENING_OFFER.get(counterpart_issue_id)
+                                counterpart_direction = _compare_recruiter_value(counterpart_issue_id, counterpart_value, counterpart_prior_value)
+                                if counterpart_direction == 'better':
+                                    genuine_concession_this_round = True
+                                    genuine_concession_value = counterpart_value
+                                    genuine_concession_label = next(
+                                        (item['label'] for item in _default_issue_statuses() if item['id'] == counterpart_issue_id),
+                                        counterpart_issue_id
+                                    )
+                                    print(f"[INFO /lucid] Candidate accepted a real cost ({counterpart_issue_id}->{counterpart_value}) as part of accepting the recruiter's own prior trade - counted as a genuine concession") # Vercel Log
+                                elif counterpart_direction == 'unknown':
+                                    unverified_trust_notes.append(
+                                        f"Concession check (round {turn_number}): classifier said the candidate "
+                                        f"accepted a prior trade costing them {counterpart_issue_id} -> "
+                                        f"'{counterpart_value}', but that value couldn't be matched against the "
+                                        f"payoff table (unknown) - not counted as a confirmed genuine concession, "
+                                        f"but not ruled out either."
+                                    )
+                                # 'worse'/'same' silently not counted - same as the is_concession
+                                # path above, no unverified-trust note needed since the payoff
+                                # table gave a confident, negative answer.
 
                     # --- Prosocial-only: one-time "first concession" exception ---
                     # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate
@@ -1975,8 +2063,17 @@ def lucid():
                             # more than that - using the real payoff table rather than
                             # trusting the model followed through.
                             if first_concession_note:
+                                # Excludes accepted_issue_id from the "pick any other issue"
+                                # pool below: when the exception fired via the candidate
+                                # accepting a trade the recruiter itself already promised (see
+                                # the accepted_counterpart_* path in Step 3), that issue is
+                                # already being fulfilled this round as part of an existing
+                                # promise, not an eligible NEW gift - see
+                                # _first_concession_grant_status's docstring for the live bug
+                                # this closes.
                                 grant_status, grant_info, grant_unverified_note, assistant_updates = _first_concession_grant_status_with_fallback(
-                                    prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text
+                                    prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text,
+                                    exclude_issue_id=round_concession_check.get('accepted_issue_id')
                                 )
                                 if grant_unverified_note:
                                     unverified_trust_notes.append(grant_unverified_note)
@@ -2018,7 +2115,8 @@ def lucid():
                                         generated_text = retry_text
                                         assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
                                         recheck_status, recheck_info, recheck_unverified_note, assistant_updates = _first_concession_grant_status_with_fallback(
-                                            prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text
+                                            prior_issue_statuses, assistant_updates, first_concession_target_issue, generated_text,
+                                            exclude_issue_id=round_concession_check.get('accepted_issue_id')
                                         )
                                         if recheck_unverified_note:
                                             unverified_trust_notes.append(recheck_unverified_note)

@@ -130,7 +130,8 @@ def main():
         round_concession_check = {'is_concession': False, 'requested_issue_id': None,
                                    'conceded_issue_id': None, 'conceded_new_value': None,
                                    'accepts_prior_offer': False, 'accepted_issue_id': None,
-                                   'accepted_value': None}
+                                   'accepted_value': None, 'accepted_counterpart_issue_id': None,
+                                   'accepted_counterpart_value': None}
         # Ground the classifier with the recruiter's full current package (falling back to
         # RECRUITER_OPENING_OFFER for anything not yet recorded) so a vague candidate message
         # like "I can take a later start date" gets extracted as the concrete value actually
@@ -185,6 +186,34 @@ def main():
                     "Concession check: classifier said is_concession=true but didn't name a "
                     "specific conceded issue/value to verify against the payoff table."
                 )
+
+        # Mirrors lucid.py: accepting a trade the RECRUITER itself proposed can also be a
+        # genuine concession - the candidate is still paying real value, just for a number
+        # the recruiter named first. Only counts if not already confirmed genuine above, and
+        # only when the recruiter's own prior message named a real, payoff-table-verifiable
+        # cost on the candidate's side.
+        if not genuine_concession_this_round and round_concession_check.get('accepts_prior_offer'):
+            counterpart_issue_id = round_concession_check.get('accepted_counterpart_issue_id')
+            counterpart_value = round_concession_check.get('accepted_counterpart_value')
+            if counterpart_issue_id and counterpart_value:
+                prior_by_id_cp = {item['id']: item['status'] for item in current_statuses}
+                counterpart_prior_value = prior_by_id_cp.get(counterpart_issue_id) or lucid.RECRUITER_OPENING_OFFER.get(counterpart_issue_id)
+                counterpart_direction = lucid._compare_recruiter_value(counterpart_issue_id, counterpart_value, counterpart_prior_value)
+                if counterpart_direction == 'better':
+                    genuine_concession_this_round = True
+                    genuine_concession_value = counterpart_value
+                    genuine_concession_label = next(
+                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == counterpart_issue_id),
+                        counterpart_issue_id
+                    )
+                    print(f"  [candidate accepted a real cost ({counterpart_issue_id}->{counterpart_value}) as part of accepting the recruiter's own prior trade - counted as a genuine concession]")
+                elif counterpart_direction == 'unknown':
+                    unverified_trust_notes.append(
+                        f"Concession check: classifier said the candidate accepted a prior trade "
+                        f"costing them {counterpart_issue_id} -> '{counterpart_value}', but that "
+                        f"value couldn't be matched against the payoff table (unknown) - not "
+                        f"counted as a confirmed genuine concession, but not ruled out either."
+                    )
 
         # --- Same ephemeral round-number note as lucid.py's /lucid endpoint (strengthened
         # during the hold-firm window, rounds 1-HOLD_FIRM_ROUNDS) ---
@@ -471,8 +500,12 @@ def main():
         # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
         # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
         if first_concession_note_fired:
+            # Excludes accepted_issue_id (mirrors lucid.py): if the exception fired via the
+            # candidate accepting a trade the recruiter itself already promised, that issue
+            # is already being fulfilled this round, not an eligible NEW gift.
             grant_status, grant_info, grant_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
-                current_statuses, assistant_updates, first_concession_target_issue, reply
+                current_statuses, assistant_updates, first_concession_target_issue, reply,
+                exclude_issue_id=round_concession_check.get('accepted_issue_id')
             )
             if grant_unverified_note:
                 unverified_trust_notes.append(grant_unverified_note)
@@ -514,7 +547,8 @@ def main():
                     reply = retry_text
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
                     recheck_status, recheck_info, recheck_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
-                        current_statuses, assistant_updates, first_concession_target_issue, reply
+                        current_statuses, assistant_updates, first_concession_target_issue, reply,
+                        exclude_issue_id=round_concession_check.get('accepted_issue_id')
                     )
                     if recheck_unverified_note:
                         unverified_trust_notes.append(recheck_unverified_note)
