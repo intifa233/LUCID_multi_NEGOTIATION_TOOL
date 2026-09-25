@@ -898,6 +898,35 @@ def _prior_offer_landed_status(assistant_updates, accepted_issue_id, accepted_va
     return 'under', actual_value  # 'better' for the recruiter than promised = under-delivered
 
 
+def _value_mentioned_in_prose(raw_text, value):
+    """
+    Whether a specific value (e.g. "6%", "Plan C", "$86,000") is mentioned in the reply's
+    PROSE - the part before the "Current package" recap block - rather than only in the
+    recap table itself. Cheap, deterministic, no extra LLM call: strips the recap off,
+    normalizes away $/commas/case on both sides, and does a plain substring search.
+
+    Used to narrow the final audit's "genuine concession this round" / "accepts prior
+    offer" exemptions (see Rule 3 below): either flag being true only proves ONE specific
+    issue actually got conceded/reciprocated/promised - a real trade found live where Alex
+    correctly traded moving-expense-for-salary, and the recap silently ALSO bumped Bonus
+    from 4% to 6% with zero mention anywhere in the text ("6%" doesn't appear in the
+    prose at all). The recruiter is allowed to reciprocate on a different low-priority
+    issue instead of the one requested/accepted (prompts.yaml says so explicitly, and
+    other tests rely on a narrated-but-different-issue move like "I've also improved your
+    insurance to Plan C" surviving untouched) - checking the VALUE rather than the issue's
+    formal label matches how people actually talk ("insurance" or "the vacation days",
+    not "Insurance Coverage"/"Vacation Time"), while still catching a value that's truly
+    never mentioned anywhere.
+    """
+    if not raw_text or not value:
+        return False
+    cleaned = str(raw_text).replace('**', '')
+    prose = re.split(r'current\s+package\s*:', cleaned, maxsplit=1, flags=re.IGNORECASE)[0]
+    norm_prose = re.sub(r'[,$]', '', prose).lower()
+    norm_value = re.sub(r'[,$]', '', str(value)).strip().lower()
+    return bool(norm_value) and norm_value in norm_prose
+
+
 # --- Round-based concession pacing targets (both conditions) ---
 # Turns prompts.yaml's [CONCESSION PACING] prose into an explicit, checkable requirement:
 # by the round the schedule names as a deadline, Salary/Vacation Time must have moved at
@@ -2187,9 +2216,26 @@ def lucid():
                                             # 8-10 only - pacing_stretch_target is None everywhere else) -
                                             # pacing takes priority in this window, not gated on a fresh
                                             # concession this specific round
-                                        if genuine_concession_this_round:
-                                            continue  # a real concession happened - some reciprocal movement is expected
-                                        if round_concession_check.get('accepts_prior_offer'):
+                                        # A genuine concession or an accepted prior offer only ever
+                                        # justifies ONE specific issue moving for free - not a blanket
+                                        # pass for every issue that happens to move this round. Found
+                                        # live: a real moving-expense-for-salary trade correctly
+                                        # exempted Salary, but the same blanket flag also silently let
+                                        # Bonus jump from 4% to 6% with zero mention anywhere in the
+                                        # text. Exempt this issue only if it's the one the round's
+                                        # classifier actually ties to the trade, OR the reply's own
+                                        # prose names it (the recruiter reciprocating on a DIFFERENT
+                                        # issue than requested is legitimate per prompts.yaml, but
+                                        # should be narrated, not slipped into the recap silently).
+                                        if genuine_concession_this_round and (
+                                            issue_id == round_concession_check.get('requested_issue_id')
+                                            or _value_mentioned_in_prose(generated_text, new_val)
+                                        ):
+                                            continue
+                                        if round_concession_check.get('accepts_prior_offer') and (
+                                            issue_id == round_concession_check.get('accepted_issue_id')
+                                            or _value_mentioned_in_prose(generated_text, new_val)
+                                        ):
                                             continue  # candidate accepted a trade the recruiter itself
                                             # already proposed - not a free giveaway, it's the
                                             # recruiter following through on its own prior offer
