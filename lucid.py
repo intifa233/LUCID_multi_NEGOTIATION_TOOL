@@ -2550,6 +2550,23 @@ def lucid():
                                     old_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
                                     if new_val == old_val:
                                         continue  # nothing actually changed on this issue - nothing to revert
+                                    # If this move doesn't go beyond what the recruiter's OWN
+                                    # concession schedule already mandates by this round, it's
+                                    # not something the candidate needs to confirm - it's
+                                    # unilateral and due regardless. Found live: a reply bundled
+                                    # a pacing-MANDATORY Salary/Vacation move together with an
+                                    # optional conditional ask (a bonus cut) in one "if you
+                                    # accept" sentence - the classifier correctly read the whole
+                                    # sentence as conditional, but reverting Salary/Vacation to
+                                    # satisfy that then violated Rule 2's pacing minimum for this
+                                    # round, and the two rules' regenerations couldn't converge.
+                                    # Same exemption Rule 3 already uses for the same reason.
+                                    pacing_step = pacing_target.get(issue_id)
+                                    if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
+                                        continue
+                                    stretch_step = pacing_stretch_target.get(issue_id)
+                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                        continue
                                     uc_label = next(
                                         (item['label'] for item in _default_issue_statuses() if item['id'] == issue_id),
                                         issue_id
