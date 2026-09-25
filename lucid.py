@@ -14,10 +14,62 @@ import requests # Used for making HTTP requests to the OpenAI API
 import html
 import re      # For parsing model JSON/code-fence responses
 import yaml    # For loading per-condition negotiation prompts from prompts.yaml
+import time    # For the short backoff sleep in _post_openai_with_retry
 from datetime import datetime, timezone  # For timestamping offer-trajectory entries
 
 # Initialize the Flask application
 app = Flask(__name__)
+
+# --- Retry wrapper for OpenAI calls ---
+
+# Status codes OpenAI itself uses for "try again, this wasn't your fault": rate-limited
+# (429) or momentarily overloaded/unavailable (500/502/503/504). Confirmed live in
+# production: a 503 that arrived AND resolved in under 100ms - nothing to do with our
+# own prompt content or timeout budgets, just a transient upstream hiccup that a plain
+# retry would have papered over.
+_TRANSIENT_OPENAI_STATUSES = (429, 500, 502, 503, 504)
+
+
+def _post_openai_with_retry(url, headers, payload, timeout, max_retries=2, backoff_seconds=(1, 2)):
+    """
+    POSTs to the OpenAI API, retrying on failures that are cheap and worth retrying:
+    a transient HTTP status (_TRANSIENT_OPENAI_STATUSES above) or a
+    requests.exceptions.ConnectionError (network-level failure, also typically fast).
+    Up to max_retries retries (3 attempts total by default), with a short sleep
+    between attempts.
+
+    Deliberately does NOT retry on requests.exceptions.Timeout - a timeout already
+    means the full timeout budget (25s/45s) was spent once; retrying would double
+    that single call's worst-case latency and stack badly with the per-round
+    safety-net chain (see /lucid Step 5), for a failure mode the generous per-call
+    timeouts already exist to absorb. Timeout still propagates to the caller
+    unchanged, same as before this wrapper existed.
+
+    Returns the final requests.Response - either a 200, or the last non-transient/
+    still-failing response after retries are exhausted. Callers keep handling
+    non-200 status codes exactly as they did before; this wrapper only changes
+    what happens before a status code reaches them.
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        except requests.exceptions.ConnectionError as e:
+            if attempt >= max_retries:
+                raise
+            wait = backoff_seconds[min(attempt, len(backoff_seconds) - 1)]
+            print(f"[WARN] OpenAI call raised {type(e).__name__}, retrying in {wait}s (attempt {attempt + 1}/{max_retries})") # Vercel Log
+            time.sleep(wait)
+            attempt += 1
+            continue
+
+        if resp.status_code not in _TRANSIENT_OPENAI_STATUSES or attempt >= max_retries:
+            return resp
+
+        wait = backoff_seconds[min(attempt, len(backoff_seconds) - 1)]
+        print(f"[WARN] OpenAI call returned {resp.status_code} (transient), retrying in {wait}s (attempt {attempt + 1}/{max_retries})") # Vercel Log
+        time.sleep(wait)
+        attempt += 1
 
 # --- Condition Prompts (prompts.yaml) ---
 
@@ -140,7 +192,7 @@ def _extract_issue_updates_from_message_llm(message, openai_api_key):
         # timeout was originally sized for. This call IS caught locally (returns {} below on
         # any exception), so a timeout here degrades gracefully rather than 500ing - but too
         # tight a timeout still means losing this round's extraction unnecessarily often.
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
+        resp = _post_openai_with_retry('https://api.openai.com/v1/chat/completions', headers, payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] LLM issue-update extraction returned {resp.status_code}, skipping updates")
             return {}
@@ -360,7 +412,7 @@ def _detect_first_concession_llm(user_message, openai_api_key, current_offer_sta
         # output; this call IS caught locally (degrades gracefully to the empty default on
         # any exception), but too tight a timeout means losing this classification more
         # often than necessary.
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
+        resp = _post_openai_with_retry('https://api.openai.com/v1/chat/completions', headers, payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] First-concession detection returned {resp.status_code}, skipping")
             return dict(empty_result)
@@ -479,7 +531,7 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
         # output; this call IS caught locally (degrades gracefully to the empty default on
         # any exception), but too tight a timeout means losing this classification more
         # often than necessary.
-        resp = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload, timeout=25)
+        resp = _post_openai_with_retry('https://api.openai.com/v1/chat/completions', headers, payload, timeout=25)
         if resp.status_code != 200:
             print(f"[INFO] Reciprocity-claim detection returned {resp.status_code}, skipping")
             return dict(empty_result)
@@ -907,10 +959,10 @@ def _call_openai_completion(messages, model, temperature, seed, openai_api_key, 
         payload = {'model': model, 'messages': messages, 'temperature': temperature}
         if seed is not None:
             payload['seed'] = seed
-        resp = requests.post(
+        resp = _post_openai_with_retry(
             'https://api.openai.com/v1/chat/completions',
-            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {openai_api_key}'},
-            json=payload, timeout=timeout
+            {'Content-Type': 'application/json', 'Authorization': f'Bearer {openai_api_key}'},
+            payload, timeout=timeout
         )
         if resp.status_code != 200:
             print(f"[WARN] Hold-firm regeneration call returned {resp.status_code}")
@@ -1776,7 +1828,11 @@ def lucid():
                     # measurably slower/more variable than gpt-4o; a timeout here isn't caught
                     # locally, it propagates to the outer handler as a generic 500, which the
                     # frontend shows as "couldn't be sent" - found live in production.
-                    response_openai = requests.post(openai_url, headers=headers, json=data_payload, timeout=45)
+                    # _post_openai_with_retry additionally retries once/twice on a transient
+                    # OpenAI-side error (429/500/502/503/504) before giving up - found live in
+                    # production too: a 503 that arrived and resolved in under 100ms, nothing
+                    # to do with our own timeout budget, that a plain retry would have absorbed.
+                    response_openai = _post_openai_with_retry(openai_url, headers, data_payload, timeout=45)
                     openai_status = response_openai.status_code
                     openai_response_text = response_openai.text # Get raw text for potential error logging
                     print(f"[INFO /lucid] OpenAI response status: {openai_status}") # Vercel Log

@@ -48,10 +48,13 @@ def _load_dotenv(path='.env'):
 
 
 def call_openai(messages, api_key, model, temperature):
-    resp = requests.post(
+    # Mirrors lucid.py's own main-completion call: goes through _post_openai_with_retry so
+    # this local harness sees the same transient-503-retry behavior as production, instead
+    # of raising on the first hiccup.
+    resp = lucid._post_openai_with_retry(
         'https://api.openai.com/v1/chat/completions',
-        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
-        json={'model': model, 'messages': messages, 'temperature': temperature},
+        {'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+        {'model': model, 'messages': messages, 'temperature': temperature},
         timeout=45  # matches lucid.py's /lucid endpoint - gpt-5.6 runs slower/more variable
     )
     if resp.status_code != 200:
