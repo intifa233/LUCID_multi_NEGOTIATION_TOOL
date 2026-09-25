@@ -795,6 +795,38 @@ def _one_level_step(issue_id, current_value):
     return sorted_options[idx - 1][0]
 
 
+# Salary (issue-7) and Vacation Time (issue-3) are never in this list - those are governed
+# by the normal hold-firm/pacing schedule instead, never this one-time exception.
+_ALTERNATE_GIFT_ISSUE_LABELS = {
+    'issue-1': 'Bonus', 'issue-2': 'Job Assignment', 'issue-4': 'Starting Date',
+    'issue-5': 'Moving Expense Coverage', 'issue-6': 'Insurance Coverage', 'issue-8': 'Location',
+}
+
+
+def _alternate_gift_issue_list_text(exclude_issue_id=None):
+    """
+    Builds the human-readable list of issues offered in Prosocial's "pick ONE of your other
+    issues" first-concession fallback prompt text, optionally excluding exclude_issue_id.
+
+    Exists so this text stays in sync with _first_concession_grant_status's own candidate
+    pool (see its exclude_issue_id param) - found live: when the exception fires via a
+    candidate accepting a trade the recruiter itself already promised (accepted_issue_id is
+    set), that issue is excluded from the valid-grant scan since it's already being
+    fulfilled this round, not an eligible NEW gift - but the prompt text used to always list
+    all six issues regardless, including the one just excluded (e.g. "Starting Date" still
+    offered as a choice even though accepted_issue_id is Starting Date). If the model had
+    ever taken that offered choice, the verification would reject it as ungranted and force
+    an unnecessary regeneration - the instruction and the check need to agree on the same
+    pool.
+    """
+    eligible = [label for iid, label in _ALTERNATE_GIFT_ISSUE_LABELS.items() if iid != exclude_issue_id]
+    if not eligible:
+        return ''
+    if len(eligible) == 1:
+        return eligible[0]
+    return ', '.join(eligible[:-1]) + ', or ' + eligible[-1]
+
+
 def _first_concession_grant_status(prior_statuses, assistant_updates, target_issue_id, exclude_issue_id=None):
     """
     Evaluates a first-concession grant note (see /lucid Step 3) against the one-level cap
@@ -1710,8 +1742,8 @@ def lucid():
                                     f"[System note: this is the candidate's first concession this negotiation, "
                                     f"but you cannot move on Salary or Vacation Time right now (still in your "
                                     f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
-                                    f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
-                                    f"Date, Moving Expense Coverage, or Location) and move it ONE step in the "
+                                    f"your other issues ({_alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                                    f"and move it ONE step in the "
                                     f"candidate's favor, unconditionally, in this reply, even if they haven't "
                                     f"specifically asked for it - explain you can't move on salary/vacation yet "
                                     f"but want to show good faith. Do NOT jump straight to their ideal value on "
@@ -1731,9 +1763,9 @@ def lucid():
                                 # that are actually true.
                                 first_concession_note = (
                                     f"[System note: this is the candidate's first concession this negotiation. "
-                                    f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
-                                    f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
-                                    f"Location) and move it ONE step in the candidate's favor, unconditionally, "
+                                    f"As a one-time goodwill gesture, pick ONE of your other issues "
+                                    f"({_alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                                    f"and move it ONE step in the candidate's favor, unconditionally, "
                                     f"in this reply, even if they haven't specifically asked for it. Do NOT jump "
                                     f"straight to their ideal value on whatever issue you pick - one step only. "
                                     f"Keep handling Salary and Vacation Time through your normal concession "
@@ -2097,9 +2129,9 @@ def lucid():
                                         grant_instruction = f"grant your one-time, one-step gift on {grant_label}"
                                     else:
                                         grant_instruction = (
-                                            "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
-                                            "Starting Date, Moving Expense Coverage, or Location) and grant your "
-                                            "one-time, one-step gift on it"
+                                            f"pick ONE of your other issues "
+                                            f"({_alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                                            f"and grant your one-time, one-step gift on it"
                                         )
                                     print(f"[WARN /lucid] First-concession grant not honored ({grant_status}), regenerating") # Vercel Log
                                     correction_note = (
