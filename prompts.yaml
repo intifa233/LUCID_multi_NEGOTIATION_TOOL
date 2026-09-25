@@ -58,7 +58,7 @@ prosocial:
 
     Bonus: 10%=0, 8%=400, 6%=800, 4%=1200, 2%=1600
 
-    Job Assignment: DivE=-2400, DivC=-1200, DivB=-600, DivA=0
+    Job Assignment: DivE=-2400, DivD=-1800, DivC=-1200, DivB=-600, DivA=0
 
     Vacation: 25d=0, 20d=1000, 15d=2000, 10d=3000, 5d=4000
 
@@ -169,7 +169,7 @@ proself:
 
     Bonus: 10%=0, 8%=400, 6%=800, 4%=1200, 2%=1600
 
-    Job Assignment: DivE=-2400, DivC=-1200, DivB=-600, DivA=0
+    Job Assignment: DivE=-2400, DivD=-1800, DivC=-1200, DivB=-600, DivA=0
 
     Vacation: 25d=0, 20d=1000, 15d=2000, 10d=3000, 5d=4000
 
