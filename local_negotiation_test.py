@@ -392,8 +392,8 @@ def main():
                         f"[System note: this is the candidate's first concession this negotiation, "
                         f"but you cannot move on Salary or Vacation Time right now (still in your "
                         f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
-                        f"your other issues (Bonus, Job Assignment, Insurance Coverage, Starting "
-                        f"Date, Moving Expense Coverage, or Location) and move it ONE step in the "
+                        f"your other issues ({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                        f"and move it ONE step in the "
                         f"candidate's favor, unconditionally, in this reply, even if they haven't "
                         f"specifically asked for it - explain you can't move on salary/vacation yet "
                         f"but want to show good faith. Do NOT jump straight to their ideal value on "
@@ -407,9 +407,9 @@ def main():
                     # hold-firm window" when that isn't true.
                     note = (
                         f"[System note: this is the candidate's first concession this negotiation. "
-                        f"As a one-time goodwill gesture, pick ONE of your other issues (Bonus, Job "
-                        f"Assignment, Insurance Coverage, Starting Date, Moving Expense Coverage, or "
-                        f"Location) and move it ONE step in the candidate's favor, unconditionally, in "
+                        f"As a one-time goodwill gesture, pick ONE of your other issues "
+                        f"({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                        f"and move it ONE step in the candidate's favor, unconditionally, in "
                         f"this reply, even if they haven't specifically asked for it. Do NOT jump "
                         f"straight to their ideal value on whatever issue you pick - one step only. "
                         f"Keep handling Salary and Vacation Time through your normal concession "
@@ -529,9 +529,9 @@ def main():
                     grant_instruction = f"grant your one-time, one-step gift on {grant_label}"
                 else:
                     grant_instruction = (
-                        "pick ONE of your other issues (Bonus, Job Assignment, Insurance Coverage, "
-                        "Starting Date, Moving Expense Coverage, or Location) and grant your one-time, "
-                        "one-step gift on it"
+                        f"pick ONE of your other issues "
+                        f"({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
+                        f"and grant your one-time, one-step gift on it"
                     )
                 print(f"  [first-concession grant not honored ({grant_status}), regenerating]")
                 correction_note = (
