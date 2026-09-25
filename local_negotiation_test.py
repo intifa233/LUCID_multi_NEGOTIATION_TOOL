@@ -649,7 +649,7 @@ def main():
                 )
 
         # --- Same final-audit safety net as lucid.py's /lucid endpoint (both conditions,
-        # every round) - runs LAST, after grant/reciprocity. Merges THREE invariants:
+        # every round) - runs LAST, after grant/reciprocity. Merges FIVE invariants:
         #   1. hold-firm (rounds 1-HOLD_FIRM_ROUNDS): Salary/Vacation must still exactly
         #      match HOLD_FIRM_ANCHOR - no exceptions, not even a genuine concession. Runs
         #      every round, REGARDLESS of first_concession_will_fire - the exception never
@@ -659,6 +659,12 @@ def main():
         #   3. no free concession: no OTHER issue may have moved in the candidate's favor
         #      without a genuine concession this round - runs on a first-concession round
         #      too now, exempting only the CONFIRMED gift issue (not the whole round).
+        #   4. promised trade landed: if the candidate accepted a trade the recruiter
+        #      itself promised, verify the exact promised value actually shipped.
+        #   5. no unconfirmed proposal shipped as applied: the recap must not show a value
+        #      the reply's own prose frames as still pending acceptance - the only rule
+        #      here an LLM has to judge, since a hypothetical and a confirmed value are
+        #      identical on the payoff table.
         # Rules 1/2 exist here IN ADDITION to the dedicated hold-firm/pacing safety nets
         # above (which only ever run once) because a LATER safety net's regeneration
         # (grant/reciprocity) can silently undo either fix - observed in testing for both.
@@ -749,11 +755,31 @@ def main():
                     )
                     po_violations.append((accepted_issue_id, po_label, accepted_value))
 
-            return hf_violations, pc_violations, ug_moves, po_violations
+            # Rule 5: mirrors lucid.py - does the recap claim something has HAPPENED that
+            # this reply's own prose frames as still pending the candidate's acceptance?
+            # Can't be verified against the payoff table (a hypothetical value and a
+            # confirmed value are identical there) - needs an LLM read of the prose.
+            uc_violations = []
+            already_flagged_for_uc = already_flagged_ids | {v[0] for v in ug_moves}
+            unconfirmed_check = lucid._detect_unconfirmed_recap_values_llm(reply, api_key)
+            for issue_id in unconfirmed_check.get('unconfirmed_issue_ids', []):
+                if issue_id in already_flagged_for_uc:
+                    continue
+                new_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                old_val = prior_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
+                if new_val == old_val:
+                    continue  # nothing actually changed on this issue - nothing to revert
+                uc_label = next(
+                    (item['label'] for item in lucid._default_issue_statuses() if item['id'] == issue_id),
+                    issue_id
+                )
+                uc_violations.append((issue_id, uc_label, old_val))
 
-        hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
+            return hf_violations, pc_violations, ug_moves, po_violations, uc_violations
+
+        hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
         final_audit_attempts = 0
-        while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations) and final_audit_attempts < 2:
+        while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations) and final_audit_attempts < 2:
             final_audit_attempts += 1
             note_parts = []
             if prior_offer_violations:
@@ -796,6 +822,19 @@ def main():
                     f"{targets_desc} in this reply, even if the candidate hasn't "
                     f"specifically asked for it"
                 )
+            if unconfirmed_violations:
+                targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in unconfirmed_violations)
+                print(f"  [recap shows a not-yet-accepted proposal as if applied ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
+                note_parts.append(
+                    f"your previous draft reply's own prose framed a NEW trade on "
+                    f"{', '.join(label for _, label, _ in unconfirmed_violations)} as a "
+                    f"proposal still pending the candidate's acceptance (e.g. asking "
+                    f"\"would that work for you?\"), but the \"Current package\" recap "
+                    f"already showed it as applied - revert {targets_desc} in this "
+                    f"reply's recap. You may still PROPOSE the trade in your prose, "
+                    f"conditionally, but do not apply it in the recap until the "
+                    f"candidate actually accepts it in a future message"
+                )
             note_parts.append("keep everything else in your reply exactly as it is")
             correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
             retry_text = lucid._call_openai_completion(
@@ -807,14 +846,15 @@ def main():
                 break
             reply = retry_text
             assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
+            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
 
-        if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations:
+        if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations:
             still_bad = (
                 [label for _, label, _ in hold_firm_violations]
                 + [label for _, label, _ in pacing_violations]
                 + [label for _, label, _ in ungrounded_moves]
                 + [label for _, label, _ in prior_offer_violations]
+                + [label for _, label, _ in unconfirmed_violations]
             )
             print(f"  [still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again]")
 

@@ -590,6 +590,101 @@ def _detect_reciprocity_claim_llm(assistant_message, openai_api_key):
         return dict(empty_result)
 
 
+def _detect_unconfirmed_recap_values_llm(assistant_message, openai_api_key):
+    """
+    Analyzes the RECRUITER's own reply for issues where the "Current package" recap shows a
+    NEW value that the reply's own PROSE (the text before the recap) frames as a
+    conditional or hypothetical PROPOSAL - something the recruiter says it COULD do, or is
+    asking the candidate whether they'd accept - rather than something already confirmed,
+    applied, or agreed to this round.
+
+    Found live: the model's own recap doesn't reliably distinguish "I've applied X" from "I
+    could offer X if you accept Y - would that work for you?" - a reply can ask the
+    candidate to confirm a brand-new trade in its prose while the SAME reply's recap table
+    already shows that trade as if it were in effect. Observed for both directions in the
+    same live reply: a gain to the candidate (salary bumped up) and a loss (bonus cut down),
+    neither one actually agreed to yet.
+
+    Every other safety net in this file verifies WHETHER a move is grounded (a real
+    concession, an already-promised trade, a confirmed gift) - this is the only one that
+    asks a different question: is the recap even claiming something has HAPPENED that the
+    reply's own words say hasn't happened yet? That can't be answered by the payoff table
+    (a hypothetical $86,000 and a confirmed $86,000 are the identical value), so unlike most
+    checks in this file this one has to trust an LLM's read of the prose - kept narrow
+    (flag only what's clearly conditional, default to NOT flagging when unsure) since a
+    false positive here reverts a value the recruiter actually meant to confirm.
+
+    Returns {'unconfirmed_issue_ids': []} on any failure, or if no message/key given, so
+    this never blocks the main call.
+    """
+    empty_result = {'unconfirmed_issue_ids': []}
+    if not assistant_message or not openai_api_key:
+        return dict(empty_result)
+
+    defaults = _default_issue_statuses()
+    valid_issue_ids = {item['id'] for item in defaults}
+
+    system_prompt = (
+        "You analyze one message from a job RECRUITER in a negotiation. The message ends "
+        "with a \"Current package:\" recap listing a value for each issue. Determine which "
+        "issues, if any, have a value in that recap that the message's OWN PROSE (the text "
+        "BEFORE the recap) frames as a conditional or hypothetical PROPOSAL - something the "
+        "recruiter says it COULD do, or is asking the candidate whether they would accept - "
+        "NOT something already confirmed, applied, or agreed to this round. "
+        "Signs of a conditional/hypothetical proposal (SHOULD be flagged): 'I could offer X "
+        "if you accept Y', 'would that work for you?', 'let me know if...', 'please "
+        "confirm', 'does that work', or any sentence ending in a question about whether the "
+        "candidate accepts a NEW trade. "
+        "Signs something IS confirmed (do NOT flag it): 'Agreed', 'I've applied', a plain "
+        "declarative statement with no question or conditional 'if' attached describing this "
+        "issue specifically, or the candidate's own prior message already having accepted "
+        "it. Also do NOT flag an issue whose recap value is unchanged from what it already "
+        "was - only a NEWLY proposed value can be unconfirmed. "
+        "Issue ids and labels are: issue-1 Bonus, issue-2 Job Assignment, issue-3 Vacation "
+        "Time, issue-4 Starting Date, issue-5 Moving Expense Coverage, issue-6 Insurance "
+        "Coverage, issue-7 Salary, issue-8 Location. "
+        "Return ONLY valid JSON in this exact shape: "
+        "{\"unconfirmed_issue_ids\": [\"issue-7\", \"issue-1\"]}. Empty list if every value "
+        "in the recap is confirmed/applied, or if you are unsure - only include an issue "
+        "when the prose clearly frames it as conditional/pending, not already agreed."
+    )
+
+    payload = {
+        'model': 'gpt-5.6',  # single lightweight classification call
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': str(assistant_message)}
+        ],
+        # Same gpt-5.6 accommodations as the other classifiers in this file (no temperature
+        # override, max_completion_tokens not max_tokens, sized to survive invisible
+        # reasoning_tokens before any visible JSON).
+        'max_completion_tokens': 450,
+        'response_format': {'type': 'json_object'}
+    }
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {openai_api_key}'
+    }
+
+    try:
+        resp = _post_openai_with_retry('https://api.openai.com/v1/chat/completions', headers, payload, timeout=25)
+        if resp.status_code != 200:
+            print(f"[INFO] Unconfirmed-recap-value detection returned {resp.status_code}, skipping")
+            return dict(empty_result)
+
+        raw = resp.json()['choices'][0]['message']['content']
+        parsed = json.loads(raw)
+        ids = parsed.get('unconfirmed_issue_ids')
+        if not isinstance(ids, list):
+            ids = []
+        ids = [str(i) for i in ids if str(i) in valid_issue_ids]
+        return {'unconfirmed_issue_ids': ids}
+
+    except Exception as e:
+        print(f"[INFO] Unconfirmed-recap-value detection exception: {e}")
+        return dict(empty_result)
+
+
 # The negotiation's total round count - matches the qsf's LUCIDRoundLimit embedded-data
 # value. lucid.py has no way to read that value itself (it isn't sent in the request body),
 # so this is kept in sync by hand; used only to prescribe final-round behavior (see the
@@ -2285,7 +2380,7 @@ def lucid():
 
                             # --- Final audit safety net (both conditions, every round) - runs
                             # LAST, after hold-firm/pacing, grant, and reciprocity ---
-                            # Merges THREE invariants into one final, comprehensive check against
+                            # Merges FIVE invariants into one final, comprehensive check against
                             # whatever generated_text/assistant_updates stand at this point, after
                             # every earlier safety net's regeneration:
                             #   1. hold-firm (rounds 1-HOLD_FIRM_ROUNDS): Salary/Vacation must
@@ -2294,17 +2389,20 @@ def lucid():
                             #   2. pacing minimum: once this round is at/past a pacing deadline,
                             #      Salary/Vacation must still be at least at pacing_target.
                             #   3. no free concession: no OTHER issue may have moved in the
-                            #      candidate's favor without a genuine concession this round
-                            #      (original behavior of this safety net, unchanged) - SKIPPED
-                            #      when the first-concession exception governed this round's move
-                            #      (its own safety net handles that specific issue). Rules 1/2 are
-                            #      NOT skipped on a first-concession round: the exception never
-                            #      grants directly on Salary/Vacation (it always redirects to a
-                            #      different issue when the requested one is Salary/Vacation), so
-                            #      there is no legitimate conflict - gating all three together was
-                            #      itself a bug (found in testing: a first-concession round that
-                            #      coincided with a missed pacing deadline shipped under-conceded,
-                            #      because the whole final audit had been skipped).
+                            #      candidate's favor without a genuine concession this round -
+                            #      runs on a first-concession round too, exempting only the
+                            #      CONFIRMED gift issue (not the whole round - see
+                            #      _first_concession_grant_status's exclude_issue_id and the
+                            #      grant_status == 'ok' check below).
+                            #   4. promised trade landed: if the candidate accepted a specific
+                            #      trade the recruiter itself promised, verify the exact promised
+                            #      value actually shipped (see _prior_offer_landed_status).
+                            #   5. no unconfirmed proposal shipped as applied: the recap must not
+                            #      show a value that this reply's own prose frames as still
+                            #      pending the candidate's acceptance (see
+                            #      _detect_unconfirmed_recap_values_llm) - the only rule here that
+                            #      can't be verified against the payoff table, since a hypothetical
+                            #      value and a confirmed value are identical there.
                             # Rules 1 and 2 exist here IN ADDITION TO the dedicated hold-firm and
                             # pacing-deadline safety nets above (which only ever run once, first)
                             # because a LATER safety net's regeneration (grant/reciprocity, each
@@ -2428,11 +2526,41 @@ def lucid():
                                         )
                                         po_violations.append((accepted_issue_id, po_label, accepted_value))
 
-                                return hf_violations, pc_violations, ug_moves, po_violations
+                                # Rule 5: does the recap claim something has HAPPENED that
+                                # this reply's own prose frames as still pending the
+                                # candidate's acceptance? Unlike rules 1-4, this can't be
+                                # verified against the payoff table (a hypothetical value
+                                # and a confirmed value are identical there) - it needs an
+                                # LLM's own read of the prose (see
+                                # _detect_unconfirmed_recap_values_llm). Found live: a reply
+                                # asked "would that trade work for you?" about a brand-new
+                                # salary+bonus trade, but the SAME reply's recap already
+                                # showed both values as if applied - one favorable to the
+                                # candidate (missed by Rule 3, which only checks favorable
+                                # moves and had already exempted it via the "mentioned in
+                                # prose" check - mentioned isn't the same as confirmed) and
+                                # one unfavorable (Rule 3 never even looks at those).
+                                uc_violations = []
+                                already_flagged_for_uc = already_flagged_ids | {v[0] for v in ug_moves}
+                                unconfirmed_check = _detect_unconfirmed_recap_values_llm(generated_text, openai_api_key)
+                                for issue_id in unconfirmed_check.get('unconfirmed_issue_ids', []):
+                                    if issue_id in already_flagged_for_uc:
+                                        continue
+                                    new_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    old_val = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
+                                    if new_val == old_val:
+                                        continue  # nothing actually changed on this issue - nothing to revert
+                                    uc_label = next(
+                                        (item['label'] for item in _default_issue_statuses() if item['id'] == issue_id),
+                                        issue_id
+                                    )
+                                    uc_violations.append((issue_id, uc_label, old_val))
 
-                            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
+                                return hf_violations, pc_violations, ug_moves, po_violations, uc_violations
+
+                            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
                             final_audit_attempts = 0
-                            while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations) and final_audit_attempts < 2:
+                            while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations) and final_audit_attempts < 2:
                                 final_audit_attempts += 1
                                 note_parts = []
                                 if prior_offer_violations:
@@ -2454,6 +2582,19 @@ def lucid():
                                         f"{targets_desc} in this reply. You may still propose a move "
                                         f"conditionally, asking for something specific in return, but do "
                                         f"not grant it outright"
+                                    )
+                                if unconfirmed_violations:
+                                    targets_desc = ', '.join(f"{label} back to {old_val}" for _, label, old_val in unconfirmed_violations)
+                                    print(f"[WARN /lucid] Recap shows a not-yet-accepted proposal as if applied ({targets_desc}), regenerating (attempt {final_audit_attempts})") # Vercel Log
+                                    note_parts.append(
+                                        f"your previous draft reply's own prose framed a NEW trade on "
+                                        f"{', '.join(label for _, label, _ in unconfirmed_violations)} as a "
+                                        f"proposal still pending the candidate's acceptance (e.g. asking "
+                                        f"\"would that work for you?\"), but the \"Current package\" recap "
+                                        f"already showed it as applied - revert {targets_desc} in this "
+                                        f"reply's recap. You may still PROPOSE the trade in your prose, "
+                                        f"conditionally, but do not apply it in the recap until the "
+                                        f"candidate actually accepts it in a future message"
                                     )
                                 if hold_firm_violations:
                                     violated_labels = ', '.join(label for _, label, _ in hold_firm_violations)
@@ -2488,14 +2629,15 @@ def lucid():
                                 assistant_updates = _extract_issue_updates_from_message_llm(generated_text, openai_api_key)
                                 # Full re-audit, not just a recheck of the issues flagged above -
                                 # this is what catches a regeneration volunteering a NEW violation.
-                                hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations = _audit_final_state(assistant_updates)
+                                hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
 
-                            if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations:
+                            if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations:
                                 still_bad = (
                                     [label for _, label, _ in hold_firm_violations]
                                     + [label for _, label, _ in pacing_violations]
                                     + [label for _, label, _ in ungrounded_moves]
                                     + [label for _, label, _ in prior_offer_violations]
+                                    + [label for _, label, _ in unconfirmed_violations]
                                 )
                                 print(f"[WARN /lucid] Still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again") # Vercel Log
 
