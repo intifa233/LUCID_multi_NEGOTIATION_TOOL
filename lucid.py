@@ -1252,6 +1252,42 @@ def _call_openai_completion(messages, model, temperature, seed, openai_api_key, 
         return None
 
 
+def _build_edit_retry_messages(messages_for_api, current_draft, correction_note):
+    """
+    Builds the message list for a regeneration retry that EDITS the current draft in place,
+    rather than resampling fresh from the stale original context with only a description of
+    what's wrong. Used by every regeneration call site in /lucid (hold-firm, pacing, first-
+    concession, reciprocity, final audit).
+
+    Found repeatedly across this file's own history: a regeneration that never sees its own
+    previous attempt has to reconstruct the ENTIRE reply from the correction note's
+    description alone - it doesn't know what "everything else" actually said, so it's free
+    to (and empirically does) silently change or drop content the note never mentioned. This
+    is the root cause of the "one safety net's fix gets undone by a later one's regeneration"
+    pattern documented throughout this file (final audit's re-audit loop and Rule 4/6's
+    backstops exist specifically to catch the fallout of this, after the fact).
+
+    Passing the draft back as the most recent assistant turn, with an explicit "edit this
+    text, minimal change" instruction, lets the model treat it as literal text to revise
+    rather than a rough description to reconstruct from memory - the same token cost as
+    before (the model still writes out a full reply either way; this only adds a few hundred
+    cheap-to-process input tokens, not output tokens, so it doesn't meaningfully add latency),
+    but far more likely to actually preserve everything not specifically called out.
+
+    Does NOT change anything about which checks exist, their order, or the final audit's
+    2-attempt cap - only how each individual regeneration call is constructed.
+    """
+    return messages_for_api + [
+        {'role': 'assistant', 'content': current_draft},
+        {'role': 'system', 'content': (
+            correction_note + " This is a MINIMAL EDIT to your own draft reply shown "
+            "immediately above - copy it verbatim except for the specific change(s) just "
+            "described. Do not rewrite, rephrase, reorganize, or otherwise touch anything "
+            "else."
+        )}
+    ]
+
+
 def _normalize_prior_issue_statuses(raw):
     """
     Coerce whatever issue-status snapshot the frontend sent back (echoed from a
@@ -2257,7 +2293,7 @@ def lucid():
                                         f"other issue.]"
                                     )
                                     retry_text = _call_openai_completion(
-                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        _build_edit_retry_messages(messages_for_api, generated_text, correction_note),
                                         model, used_temperature, used_seed, openai_api_key
                                     )
                                     if retry_text:
@@ -2305,7 +2341,7 @@ def lucid():
                                         f"address any other issue.]"
                                     )
                                     retry_text = _call_openai_completion(
-                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        _build_edit_retry_messages(messages_for_api, generated_text, correction_note),
                                         model, used_temperature, used_seed, openai_api_key
                                     )
                                     if retry_text:
@@ -2417,7 +2453,7 @@ def lucid():
                                         f"{'; also, '.join(instruction_parts)}, unconditionally, in this reply.]"
                                     )
                                     retry_text = _call_openai_completion(
-                                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                        _build_edit_retry_messages(messages_for_api, generated_text, correction_note),
                                         model, used_temperature, used_seed, openai_api_key
                                     )
                                     if retry_text:
@@ -2529,7 +2565,7 @@ def lucid():
                                             f"elsewhere), but not on {credited_label}.]"
                                         )
                                         retry_text = _call_openai_completion(
-                                            messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                            _build_edit_retry_messages(messages_for_api, generated_text, correction_note),
                                             model, used_temperature, used_seed, openai_api_key
                                         )
                                         if retry_text:
@@ -2849,10 +2885,9 @@ def lucid():
                                         f"{targets_desc} in this reply, even if the candidate hasn't "
                                         f"specifically asked for it"
                                     )
-                                note_parts.append("keep everything else in your reply exactly as it is")
                                 correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
                                 retry_text = _call_openai_completion(
-                                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                                    _build_edit_retry_messages(messages_for_api, generated_text, correction_note),
                                     model, used_temperature, used_seed, openai_api_key
                                 )
                                 if not retry_text:

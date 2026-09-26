@@ -487,7 +487,7 @@ def main():
                     f"candidate and move any other issue.]"
                 )
                 retry_text = lucid._call_openai_completion(
-                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    lucid._build_edit_retry_messages(messages_for_api, reply, correction_note),
                     model, temperature, None, api_key
                 )
                 if retry_text:
@@ -517,7 +517,7 @@ def main():
                     f"it. You may still respond to the candidate and address any other issue.]"
                 )
                 retry_text = lucid._call_openai_completion(
-                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    lucid._build_edit_retry_messages(messages_for_api, reply, correction_note),
                     model, temperature, None, api_key
                 )
                 if retry_text:
@@ -606,7 +606,7 @@ def main():
                     f"{'; also, '.join(instruction_parts)}, unconditionally, in this reply.]"
                 )
                 retry_text = lucid._call_openai_completion(
-                    messages_for_api + [{'role': 'system', 'content': correction_note}],
+                    lucid._build_edit_retry_messages(messages_for_api, reply, correction_note),
                     model, temperature, None, api_key
                 )
                 if retry_text:
@@ -685,7 +685,7 @@ def main():
                         f"concession the candidate made elsewhere), but not on {credited_label}.]"
                     )
                     retry_text = lucid._call_openai_completion(
-                        messages_for_api + [{'role': 'system', 'content': correction_note}],
+                        lucid._build_edit_retry_messages(messages_for_api, reply, correction_note),
                         model, temperature, None, api_key
                     )
                     if retry_text:
@@ -942,10 +942,9 @@ def main():
                     f"conditionally, but do not apply it in the recap until the "
                     f"candidate actually accepts it in a future message"
                 )
-            note_parts.append("keep everything else in your reply exactly as it is")
             correction_note = "[System note: " + "; also, ".join(note_parts) + ".]"
             retry_text = lucid._call_openai_completion(
-                messages_for_api + [{'role': 'system', 'content': correction_note}],
+                lucid._build_edit_retry_messages(messages_for_api, reply, correction_note),
                 model, temperature, None, api_key
             )
             if not retry_text:
