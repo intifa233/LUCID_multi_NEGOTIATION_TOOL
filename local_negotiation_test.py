@@ -127,6 +127,8 @@ def main():
         genuine_concession_this_round = False
         genuine_concession_label = None
         genuine_concession_value = None
+        # Mirrors lucid.py: unified issue-id for whichever path set genuine_concession_this_round.
+        genuine_concession_issue_id = None
         round_concession_check = {'is_concession': False, 'requested_issue_id': None,
                                    'conceded_issue_id': None, 'conceded_new_value': None,
                                    'accepts_prior_offer': False, 'accepted_issue_id': None,
@@ -168,6 +170,7 @@ def main():
                 if conceded_direction == 'better':
                     genuine_concession_this_round = True
                     genuine_concession_value = conceded_new_value
+                    genuine_concession_issue_id = conceded_issue_id
                     genuine_concession_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == conceded_issue_id),
                         conceded_issue_id
@@ -202,6 +205,7 @@ def main():
                 if counterpart_direction == 'better':
                     genuine_concession_this_round = True
                     genuine_concession_value = counterpart_value
+                    genuine_concession_issue_id = counterpart_issue_id
                     genuine_concession_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == counterpart_issue_id),
                         counterpart_issue_id
@@ -344,19 +348,42 @@ def main():
         messages_for_api = messages + [{'role': 'system', 'content': round_note}]
 
         # --- Same Prosocial-only first-concession exception as lucid.py's /lucid endpoint.
-        # Trigger (a genuine concession) and grant (never Salary/Vacation) are decoupled: the
-        # exception consumes on any genuine concession, but if the candidate specifically
-        # asked for Salary/Vacation, the model is told to grant a different issue instead. ---
+        # The candidate's own proposed exchange (conceded issue <-> requested issue) resolves
+        # as an all-or-nothing PACKAGE: Case 1 (requested side grantable) - both sides apply;
+        # Case 2 (requested side blocked, e.g. Salary/Vacation still in hold-firm) - neither
+        # side applies. Either way, a separate one-time gift ALSO fires unconditionally, on a
+        # third issue distinct from both sides. Only applies when genuine_concession_this_round
+        # came from the classic is_concession path (a real requested_issue_id to resolve) -
+        # the accepts_prior_offer path has nothing to grant/decline (already verified
+        # separately), just the plain alternate gift. ---
         first_concession_target_issue = None
+        first_concession_package_case = None
+        first_concession_requested_issue_id = None
         if first_concession_will_fire:
-            if True:  # extra nesting kept only so the block below didn't need re-indenting
+            first_concession_used = True  # consumed either way
+
+            conceded_issue_id = genuine_concession_issue_id
+            conceded_value = genuine_concession_value
+            conceded_label = genuine_concession_label
+
+            if round_concession_check.get('is_concession'):
                 requested_issue_id = round_concession_check.get('requested_issue_id')
                 in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
-                first_concession_used = True  # consumed either way
-                if requested_issue_id and requested_issue_id not in ('issue-3', 'issue-7'):
-                    # Grantable outright - but capped to ONE grid step toward the candidate,
-                    # not a jump straight to whatever they specifically asked for.
-                    first_concession_target_issue = requested_issue_id
+                first_concession_requested_issue_id = requested_issue_id
+                request_blocked = (not requested_issue_id) or (
+                    requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window
+                )
+                gift_exclude_ids = {conceded_issue_id, requested_issue_id}
+                gift_note = (
+                    f"Separately - regardless of how the trade above resolves - as a "
+                    f"one-time goodwill gesture, pick ONE of your other issues "
+                    f"({lucid._alternate_gift_issue_list_text(gift_exclude_ids)}) and move it "
+                    f"ONE step in the candidate's favor, unconditionally, in this reply, "
+                    f"even if they haven't specifically asked for it. Do NOT jump straight "
+                    f"to their ideal value on whatever issue you pick - one step only."
+                )
+                if not request_blocked:
+                    first_concession_package_case = 'granted'
                     requested_issue_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == requested_issue_id),
                         requested_issue_id
@@ -366,70 +393,72 @@ def main():
                     one_level_value = lucid._one_level_step(requested_issue_id, requested_prior_value)
                     if one_level_value:
                         note = (
-                            f"[System note: this is the candidate's first concession this negotiation. "
-                            f"Per your one-time first-concession exception, move {requested_issue_label} "
-                            f"ONE step in the candidate's favor this reply - specifically to "
-                            f"{one_level_value} - unconditionally. Do NOT jump straight to whatever they "
-                            f"specifically asked for, even if it's less generous than their request - one "
-                            f"step only. Do NOT accept whatever concession they offered in return, even "
-                            f"though they offered it - explicitly tell them it isn't needed, and leave "
-                            f"every other issue exactly at its current value this round.]"
+                            f"[System note: this is the candidate's first concession this "
+                            f"negotiation - they offered {conceded_label} at {conceded_value} "
+                            f"in exchange for {requested_issue_label}. Apply BOTH sides of "
+                            f"that trade in this reply, unconditionally: set {conceded_label} "
+                            f"to exactly {conceded_value}, and move {requested_issue_label} "
+                            f"ONE step in the candidate's favor - specifically to "
+                            f"{one_level_value} - not straight to whatever they specifically "
+                            f"asked for, even if it's less generous than their request. "
+                            f"{gift_note}]"
                         )
                     else:
                         note = (
-                            f"[System note: this is the candidate's first concession this negotiation, "
-                            f"but {requested_issue_label} is already at its most candidate-favorable "
-                            f"value - there's nothing left to move there. As a one-time goodwill gesture "
-                            f"instead, pick ONE of your other issues and move it ONE step in the "
-                            f"candidate's favor, unconditionally, even if they haven't specifically asked "
-                            f"for it.]"
+                            f"[System note: this is the candidate's first concession this "
+                            f"negotiation - they offered {conceded_label} at {conceded_value} "
+                            f"in exchange for {requested_issue_label}, but {requested_issue_label} "
+                            f"is already at its most candidate-favorable value - there's "
+                            f"nothing left to move there. Still apply their offered concession: "
+                            f"set {conceded_label} to exactly {conceded_value} in this reply, "
+                            f"unconditionally. {gift_note}]"
                         )
-                        first_concession_target_issue = None
-                    print(f"  [first-concession exception triggered on {requested_issue_label}]")
-                elif requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window:
-                    # Only case where the hold-firm framing is actually true.
-                    note = (
-                        f"[System note: this is the candidate's first concession this negotiation, "
-                        f"but you cannot move on Salary or Vacation Time right now (still in your "
-                        f"hold-firm window). As a one-time goodwill gesture instead, pick ONE of "
-                        f"your other issues ({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
-                        f"and move it ONE step in the "
-                        f"candidate's favor, unconditionally, in this reply, even if they haven't "
-                        f"specifically asked for it - explain you can't move on salary/vacation yet "
-                        f"but want to show good faith. Do NOT jump straight to their ideal value on "
-                        f"whatever issue you pick - one step only. Do NOT move Salary or Vacation "
-                        f"Time.]"
-                    )
-                    print("  [first-concession exception triggered (hold-firm window - granting an alternate issue instead)]")
+                    print(f"  [first-concession exception triggered - package trade granted ({conceded_label} for {requested_issue_label})]")
                 else:
-                    # Classifier's ask was unclear, or it was Salary/Vacation but the
-                    # hold-firm window already passed - don't claim "still in your
-                    # hold-firm window" when that isn't true.
+                    first_concession_package_case = 'blocked'
+                    if requested_issue_id in ('issue-3', 'issue-7'):
+                        block_reason = "Salary/Vacation Time is still in your hold-firm window"
+                        blocked_label = 'Salary' if requested_issue_id == 'issue-7' else 'Vacation Time'
+                        trade_desc = f"{conceded_label} at {conceded_value} in exchange for {blocked_label}"
+                    else:
+                        block_reason = "it wasn't clear which specific issue they were asking you to move on"
+                        trade_desc = f"{conceded_label} at {conceded_value} in exchange for something else"
                     note = (
-                        f"[System note: this is the candidate's first concession this negotiation. "
-                        f"As a one-time goodwill gesture, pick ONE of your other issues "
-                        f"({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
-                        f"and move it ONE step in the candidate's favor, unconditionally, in "
-                        f"this reply, even if they haven't specifically asked for it. Do NOT jump "
-                        f"straight to their ideal value on whatever issue you pick - one step only. "
-                        f"Keep handling Salary and Vacation Time through your normal concession "
-                        f"schedule separately - this one-time gift is on a different issue.]"
+                        f"[System note: this is the candidate's first concession this "
+                        f"negotiation - they offered {trade_desc}, but you cannot grant that "
+                        f"side of the trade right now ({block_reason}). Decline the WHOLE "
+                        f"trade as a package this reply: do NOT apply their offered concession "
+                        f"on {conceded_label} either - explain you can't agree to the full "
+                        f"trade yet, and leave {conceded_label} exactly at its current value "
+                        f"this round. {gift_note}]"
                     )
-                    print("  [first-concession exception triggered (unclear/out-of-window request - granting an alternate issue instead)]")
-                # A separate, deterministic message announcing exactly what got granted will
-                # be printed on its own line below, once the grant is confirmed - so tell the
-                # model not to write its own prose announcing the specific gift.
-                note += (
-                    " A separate message announcing this exact gift will be shown to the "
-                    "candidate automatically, right before this reply - so do NOT write your "
-                    "own sentence announcing or explaining this specific gift in your reply "
-                    "text. Still include the correct value in your \"Current package:\" recap "
-                    "as usual, and continue the rest of your reply normally."
-                )
-                messages_for_api.append({'role': 'system', 'content': note})
-                first_concession_note_fired = True
+                    print("  [first-concession exception triggered - package trade declined (requested side blocked)]")
             else:
-                first_concession_note_fired = False
+                # accepts_prior_offer path: nothing freshly requested, nothing to grant/decline
+                # - just the separate one-time gift, distinct from both the promised issue and
+                # what the candidate paid for it.
+                gift_exclude_ids = {round_concession_check.get('accepted_issue_id'), conceded_issue_id}
+                note = (
+                    f"[System note: this is the candidate's first concession this negotiation. "
+                    f"As a one-time goodwill gesture, pick ONE of your other issues "
+                    f"({lucid._alternate_gift_issue_list_text(gift_exclude_ids)}) and move it "
+                    f"ONE step in the candidate's favor, unconditionally, in this reply, even "
+                    f"if they haven't specifically asked for it. Do NOT jump straight to their "
+                    f"ideal value on whatever issue you pick - one step only.]"
+                )
+                print("  [first-concession exception triggered - accepted a prior trade at real cost, alternate gift only]")
+            # A separate, deterministic message announcing exactly what got granted will
+            # be printed on its own line below, once the grant is confirmed - so tell the
+            # model not to write its own prose announcing the specific gift.
+            note += (
+                " A separate message announcing this exact gift will be shown to the "
+                "candidate automatically, right before this reply - so do NOT write your "
+                "own sentence announcing or explaining this specific gift in your reply "
+                "text. Still include the correct value in your \"Current package:\" recap "
+                "as usual, and continue the rest of your reply normally."
+            )
+            messages_for_api.append({'role': 'system', 'content': note})
+            first_concession_note_fired = True
         else:
             first_concession_note_fired = False
 
@@ -497,51 +526,84 @@ def main():
                 else:
                     print("  [regeneration call failed - keeping original (under-conceded) reply]")
 
-        # --- Same first-concession grant safety net as lucid.py's /lucid endpoint: verify
-        # the reply actually granted the gift AND capped it at one level, regenerate once if not ---
+        # --- Same first-concession safety net as lucid.py's /lucid endpoint: verifies BOTH
+        # the alternate gift (landed, capped at one level) AND the package-trade side (Case
+        # 1/2), merged into one regeneration if either is wrong ---
         # Defaults so the Rule 3 mirror below can safely reference these even on a
         # non-first-concession round.
         grant_status = None
         grant_info = None
         if first_concession_note_fired:
-            # Excludes accepted_issue_id (mirrors lucid.py): if the exception fired via the
-            # candidate accepting a trade the recruiter itself already promised, that issue
-            # is already being fulfilled this round, not an eligible NEW gift.
+            # Excludes accepted_issue_id, AND both sides of this round's package trade
+            # (conceded/requested) - the gift needs to be genuinely additional.
+            gift_exclude_ids = {
+                round_concession_check.get('accepted_issue_id'),
+                genuine_concession_issue_id,
+                first_concession_requested_issue_id,
+            }
             grant_status, grant_info, grant_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
                 current_statuses, assistant_updates, first_concession_target_issue, reply,
-                exclude_issue_id=round_concession_check.get('accepted_issue_id')
+                exclude_issue_ids=gift_exclude_ids
             )
             if grant_unverified_note:
                 unverified_trust_notes.append(grant_unverified_note)
-            if grant_status != 'ok':
+            package_violations = lucid._package_trade_status(
+                current_statuses, assistant_updates, genuine_concession_issue_id,
+                genuine_concession_value, first_concession_requested_issue_id,
+                first_concession_package_case == 'blocked'
+            )
+            if grant_status != 'ok' or package_violations['conceded_wrong'] or package_violations['requested_missing']:
+                instruction_parts = []
                 if grant_status == 'overshoot':
                     overshoot_issue_id, cap_value = grant_info or (None, None)
                     overshoot_label = next(
                         (item['label'] for item in lucid._default_issue_statuses() if item['id'] == overshoot_issue_id),
                         overshoot_issue_id
                     )
-                    grant_instruction = (
+                    instruction_parts.append(
                         f"your one-time gift moved {overshoot_label} further than the single grid step "
                         f"this exception allows - scale it back to exactly {cap_value}, not the "
                         f"candidate's full ask"
                     )
-                elif first_concession_target_issue:
-                    grant_label = next(
-                        (item['label'] for item in lucid._default_issue_statuses() if item['id'] == first_concession_target_issue),
-                        first_concession_target_issue
+                elif grant_status != 'ok':
+                    if first_concession_target_issue:
+                        grant_label = next(
+                            (item['label'] for item in lucid._default_issue_statuses() if item['id'] == first_concession_target_issue),
+                            first_concession_target_issue
+                        )
+                        instruction_parts.append(f"grant your one-time, one-step gift on {grant_label}")
+                    else:
+                        instruction_parts.append(
+                            f"pick ONE of your other issues "
+                            f"({lucid._alternate_gift_issue_list_text(gift_exclude_ids)}) "
+                            f"and grant your one-time, one-step gift on it"
+                        )
+                if package_violations['conceded_wrong']:
+                    cw_issue_id, cw_label, cw_target = package_violations['conceded_wrong']
+                    if first_concession_package_case == 'blocked':
+                        instruction_parts.append(
+                            f"the requested side of the candidate's proposed trade couldn't be "
+                            f"granted this round, so the WHOLE trade is declined - revert "
+                            f"{cw_label} back to exactly {cw_target}, do not apply their offered "
+                            f"concession on it"
+                        )
+                    else:
+                        instruction_parts.append(
+                            f"set {cw_label} to exactly {cw_target}, matching what the candidate "
+                            f"actually offered - not a smaller move than that"
+                        )
+                if package_violations['requested_missing']:
+                    rm_issue_id, rm_label, rm_target = package_violations['requested_missing']
+                    instruction_parts.append(
+                        f"the candidate's trade was granted, so move {rm_label} ONE step to "
+                        f"exactly {rm_target} as promised - not the candidate's full ask, but "
+                        f"not left unmoved either"
                     )
-                    grant_instruction = f"grant your one-time, one-step gift on {grant_label}"
-                else:
-                    grant_instruction = (
-                        f"pick ONE of your other issues "
-                        f"({lucid._alternate_gift_issue_list_text(round_concession_check.get('accepted_issue_id'))}) "
-                        f"and grant your one-time, one-step gift on it"
-                    )
-                print(f"  [first-concession grant not honored ({grant_status}), regenerating]")
+                print(f"  [first-concession exception not honored (gift={grant_status}, package_case={first_concession_package_case}, violations={package_violations}), regenerating]")
                 correction_note = (
-                    f"[System note: your previous draft reply did not correctly grant your one-time "
-                    f"first-concession gift. Write your reply again: {grant_instruction}, "
-                    f"unconditionally, in this reply.]"
+                    f"[System note: your previous draft reply did not correctly handle your "
+                    f"one-time first-concession exception. Write your reply again: "
+                    f"{'; also, '.join(instruction_parts)}, unconditionally, in this reply.]"
                 )
                 retry_text = lucid._call_openai_completion(
                     messages_for_api + [{'role': 'system', 'content': correction_note}],
@@ -552,12 +614,17 @@ def main():
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
                     recheck_status, recheck_info, recheck_unverified_note, assistant_updates = lucid._first_concession_grant_status_with_fallback(
                         current_statuses, assistant_updates, first_concession_target_issue, reply,
-                        exclude_issue_id=round_concession_check.get('accepted_issue_id')
+                        exclude_issue_ids=gift_exclude_ids
                     )
                     if recheck_unverified_note:
                         unverified_trust_notes.append(recheck_unverified_note)
-                    if recheck_status != 'ok':
-                        print(f"  [first-concession grant still not honored ({recheck_status}) after regeneration - keeping it, not retrying again]")
+                    recheck_package_violations = lucid._package_trade_status(
+                        current_statuses, assistant_updates, genuine_concession_issue_id,
+                        genuine_concession_value, first_concession_requested_issue_id,
+                        first_concession_package_case == 'blocked'
+                    )
+                    if recheck_status != 'ok' or recheck_package_violations['conceded_wrong'] or recheck_package_violations['requested_missing']:
+                        print(f"  [first-concession exception still not honored after regeneration (gift={recheck_status}, violations={recheck_package_violations}) - keeping it, not retrying again]")
                     else:
                         grant_status, grant_info = recheck_status, recheck_info
                 else:
@@ -649,7 +716,7 @@ def main():
                 )
 
         # --- Same final-audit safety net as lucid.py's /lucid endpoint (both conditions,
-        # every round) - runs LAST, after grant/reciprocity. Merges FIVE invariants:
+        # every round) - runs LAST, after grant/reciprocity. Merges SIX invariants:
         #   1. hold-firm (rounds 1-HOLD_FIRM_ROUNDS): Salary/Vacation must still exactly
         #      match HOLD_FIRM_ANCHOR - no exceptions, not even a genuine concession. Runs
         #      every round, REGARDLESS of first_concession_will_fire - the exception never
@@ -665,6 +732,8 @@ def main():
         #      the reply's own prose frames as still pending acceptance - the only rule
         #      here an LLM has to judge, since a hypothetical and a confirmed value are
         #      identical on the payoff table.
+        #   6. first-concession package trade backstop: mirrors the single-shot check above -
+        #      a LATER safety net's own regeneration can silently undo what it fixed.
         # Rules 1/2 exist here IN ADDITION to the dedicated hold-firm/pacing safety nets
         # above (which only ever run once) because a LATER safety net's regeneration
         # (grant/reciprocity) can silently undo either fix - observed in testing for both.
@@ -784,13 +853,42 @@ def main():
                 )
                 uc_violations.append((issue_id, uc_label, old_val))
 
-            return hf_violations, pc_violations, ug_moves, po_violations, uc_violations
+            # Rule 6: mirrors lucid.py - backstops the single-shot first-concession safety
+            # net above against a LATER safety net's own regeneration silently undoing it.
+            pkg_violations = []
+            if first_concession_package_case:
+                pkg_check = lucid._package_trade_status(
+                    current_statuses, current_assistant_updates, genuine_concession_issue_id,
+                    genuine_concession_value, first_concession_requested_issue_id,
+                    first_concession_package_case == 'blocked'
+                )
+                if pkg_check['conceded_wrong']:
+                    pkg_violations.append(('conceded',) + pkg_check['conceded_wrong'])
+                if pkg_check['requested_missing']:
+                    pkg_violations.append(('requested',) + pkg_check['requested_missing'])
 
-        hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
+            return hf_violations, pc_violations, ug_moves, po_violations, uc_violations, pkg_violations
+
+        hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations, package_trade_violations = _audit_final_state(assistant_updates)
         final_audit_attempts = 0
-        while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations) and final_audit_attempts < 2:
+        while (hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations or package_trade_violations) and final_audit_attempts < 2:
             final_audit_attempts += 1
             note_parts = []
+            if package_trade_violations:
+                for kind, pv_issue_id, pv_label, pv_target in package_trade_violations:
+                    if kind == 'conceded':
+                        print(f"  [first-concession package trade's conceded side not resolved correctly in the final check ({pv_label} should be {pv_target}), regenerating (attempt {final_audit_attempts})]")
+                        note_parts.append(
+                            f"the first-concession package trade means {pv_label} must be "
+                            f"exactly {pv_target} in this reply - set it, unconditionally"
+                        )
+                    else:  # 'requested'
+                        print(f"  [first-concession package trade's requested side didn't land in the final check ({pv_label} should be {pv_target}), regenerating (attempt {final_audit_attempts})]")
+                        note_parts.append(
+                            f"the first-concession package trade was granted, so {pv_label} "
+                            f"must move to exactly {pv_target} in this reply - not the "
+                            f"candidate's full ask, but not left unmoved either"
+                        )
             if prior_offer_violations:
                 targets_desc = ', '.join(f"{label} to exactly {value}" for _, label, value in prior_offer_violations)
                 print(f"  [promised trade didn't land in the final check ({targets_desc}), regenerating (attempt {final_audit_attempts})]")
@@ -855,15 +953,16 @@ def main():
                 break
             reply = retry_text
             assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
-            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations = _audit_final_state(assistant_updates)
+            hold_firm_violations, pacing_violations, ungrounded_moves, prior_offer_violations, unconfirmed_violations, package_trade_violations = _audit_final_state(assistant_updates)
 
-        if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations:
+        if hold_firm_violations or pacing_violations or ungrounded_moves or prior_offer_violations or unconfirmed_violations or package_trade_violations:
             still_bad = (
                 [label for _, label, _ in hold_firm_violations]
                 + [label for _, label, _ in pacing_violations]
                 + [label for _, label, _ in ungrounded_moves]
                 + [label for _, label, _ in prior_offer_violations]
                 + [label for _, label, _ in unconfirmed_violations]
+                + [label for _, _, label, _ in package_trade_violations]
             )
             print(f"  [still not resolved on {still_bad} after {final_audit_attempts} final-check regeneration(s) - keeping it, not retrying again]")
 
