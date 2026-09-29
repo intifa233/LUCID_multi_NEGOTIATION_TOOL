@@ -2123,7 +2123,14 @@ def lucid():
                                 f" Per your concession schedule, by this round you are REQUIRED to "
                                 f"have moved {' and '.join(still_needed)} (you have not reached this "
                                 f"yet) - do so in this reply, even if the candidate hasn't "
-                                f"specifically asked for it."
+                                f"specifically asked for it. State this as a DEFINITIVE, "
+                                f"unconditional move of your own, in its own clear sentence - do NOT "
+                                f"bundle it into the same \"if you accept X, I'll do Y\" sentence as "
+                                f"anything else that still needs the candidate's agreement. If you "
+                                f"also want to propose a separate conditional trade this reply, say "
+                                f"so separately - the candidate should never be able to read your "
+                                f"message as implying they need to agree to something else before "
+                                f"this scheduled move counts, since it doesn't."
                             )
                     # General "no free concession" prescription (both conditions, every round) -
                     # tells the model BEFORE it drafts a reply whether it has any justification to
