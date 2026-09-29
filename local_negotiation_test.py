@@ -262,7 +262,14 @@ def main():
                 round_note += (
                     f" Per your concession schedule, by this round you are REQUIRED to have "
                     f"moved {' and '.join(still_needed)} (you have not reached this yet) - do "
-                    f"so in this reply, even if the candidate hasn't specifically asked for it."
+                    f"so in this reply, even if the candidate hasn't specifically asked for it. "
+                    f"State this as a DEFINITIVE, unconditional move of your own, in its own "
+                    f"clear sentence - do NOT bundle it into the same \"if you accept X, I'll "
+                    f"do Y\" sentence as anything else that still needs the candidate's "
+                    f"agreement. If you also want to propose a separate conditional trade this "
+                    f"reply, say so separately - the candidate should never be able to read "
+                    f"your message as implying they need to agree to something else before "
+                    f"this scheduled move counts, since it doesn't."
                 )
         # Same general "no free concession" prescription as lucid.py's /lucid endpoint (both
         # conditions, every round) - tells the model BEFORE it drafts a reply whether it has
