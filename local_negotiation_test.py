@@ -805,7 +805,14 @@ def main():
                 ):
                     continue  # candidate accepted a trade the recruiter itself already
                     # proposed - not a free giveaway, it's the recruiter following through
-                ug_moves.append((issue_id, item['label'], old_val))
+                # Mirrors lucid.py: revert to the pacing floor instead of the prior value
+                # when the prior value hasn't caught up to pacing yet - otherwise Rule 2
+                # would fire on the very next pass to pull it back up, burning a second
+                # regeneration attempt on something one correction could resolve.
+                revert_target = old_val
+                if pacing_step and lucid._compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
+                    revert_target = pacing_step
+                ug_moves.append((issue_id, item['label'], revert_target))
 
             # Rule 4: same as lucid.py's /lucid endpoint - if the candidate accepted a
             # specific trade the recruiter itself promised last round, verify that exact

@@ -2719,7 +2719,19 @@ def lucid():
                                         continue  # candidate accepted a trade the recruiter itself
                                         # already proposed - not a free giveaway, it's the
                                         # recruiter following through on its own prior offer
-                                    ug_moves.append((issue_id, item['label'], old_val))
+                                    # Revert target: normally the prior round's value, but if
+                                    # this issue has a pacing_target this round AND the prior
+                                    # value hasn't caught up to it yet, reverting all the way to
+                                    # the prior value would undershoot pacing's own minimum -
+                                    # Rule 2 would then fire on the very next audit pass to pull
+                                    # it back up, burning a second regeneration attempt on
+                                    # something a single correction could have resolved. Revert
+                                    # to the pacing floor instead in that case - satisfies "no
+                                    # ungrounded excess" and "pacing minimum met" in one edit.
+                                    revert_target = old_val
+                                    if pacing_step and _compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
+                                        revert_target = pacing_step
+                                    ug_moves.append((issue_id, item['label'], revert_target))
 
                                 # Rule 4: if the candidate accepted a specific trade the
                                 # recruiter itself promised last round (per
