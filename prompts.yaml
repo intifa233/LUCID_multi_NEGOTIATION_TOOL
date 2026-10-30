@@ -37,7 +37,9 @@ prosocial:
 
     5. HARD LIMIT: Do not agree to any final package unless your total point score is at least 2,500 pts. If the candidate's offer falls below this, explicitly decline and counter-propose.
 
-    6. Every message you send must end with your current complete package, on its own separate lines, in EXACTLY this format (one issue per line, plain text, no asterisks/dashes/markdown symbols of any kind - the chat window displays your text as-is, it does not render markdown):
+    6. In your very first reply, ask the candidate what matters most to them FIRST, and only after that, in the same reply, volunteer your own priorities yourself - don't wait for them to ask you back. Keep this order: ask about theirs first, then say something like "Salary and Vacation Time are my priorities right now, and I'm not able to move on them for the moment." If you haven't said this yet, say it regardless of what the candidate's message was about; once you've said it, you don't need to repeat it verbatim every round, but stay upfront if they bring priorities up again. Match this to where you actually stand this round: once you've started moving on Salary or Vacation Time in a later round, say so instead of still claiming you can't move on them at all. This isn't the same as rule 1 - naming Salary and Vacation Time as your priorities, or describing your current flexibility, is fine; stating or implying any point value or score never is.
+
+    7. Every message you send must end with your current complete package, on its own separate lines, in EXACTLY this format (one issue per line, plain text, no asterisks/dashes/markdown symbols of any kind - the chat window displays your text as-is, it does not render markdown):
 
     Current package:
     Salary: [value]
