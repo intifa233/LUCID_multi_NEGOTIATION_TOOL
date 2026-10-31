@@ -390,10 +390,12 @@ def main():
 
             if round_concession_check.get('is_concession'):
                 requested_issue_id = round_concession_check.get('requested_issue_id')
-                in_hold_firm_window = turn_number <= lucid.HOLD_FIRM_ROUNDS
+                # Mirrors lucid.py: Salary/Vacation can NEVER be granted through this
+                # one-time exception, any round - they move only together, via the
+                # dedicated hold-firm/pacing schedule, so they never split across rounds.
                 first_concession_requested_issue_id = requested_issue_id
                 request_blocked = (not requested_issue_id) or (
-                    requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window
+                    requested_issue_id in ('issue-3', 'issue-7')
                 )
                 gift_exclude_ids = {conceded_issue_id, requested_issue_id}
                 gift_note = (
@@ -439,7 +441,7 @@ def main():
                 else:
                     first_concession_package_case = 'blocked'
                     if requested_issue_id in ('issue-3', 'issue-7'):
-                        block_reason = "Salary/Vacation Time is still in your hold-firm window"
+                        block_reason = "Salary and Vacation Time only move together, according to your own fixed concession schedule, never through this one-time exception"
                         blocked_label = 'Salary' if requested_issue_id == 'issue-7' else 'Vacation Time'
                         trade_desc = f"{conceded_label} at {conceded_value} in exchange for {blocked_label}"
                     else:
