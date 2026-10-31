@@ -1186,18 +1186,22 @@ def _value_mentioned_in_prose(raw_text, value):
 # hold-firm check above), and never conceding at all even past the deadline (which nothing
 # previously caught). Keep in sync with prompts.yaml if the schedule ever changes.
 PROSELF_CONCESSION_ROUND = 9  # proself's schedule: "only in rounds 9-10" (or genuine walkaway risk, not modeled here)
-PACING_STEP = {'issue-7': '$86,000', 'issue-3': '15 days'}  # the mandated step for both conditions' first move
+# Prosocial's Salary/Vacation move lands later than proself's used to be measured from (see
+# history: this was round 6 until the schedule below was restructured) but settles at the
+# SAME final level as proself - PACING_STEP is shared, unchanged. Prosocial's distinctive,
+# earlier move is now PROSOCIAL_JOINT_GAIN_STEP below instead of a deeper Salary/Vacation
+# push.
+PROSOCIAL_CONCESSION_ROUND = 8
+PACING_STEP = {'issue-7': '$86,000', 'issue-3': '15 days'}  # the mandated final step, both conditions
 
-# Prosocial's schedule describes a SECOND, MANDATORY step beyond PACING_STEP, due by
-# PROSOCIAL_STRETCH_ROUND: Salary to $88,000 (its own hard limit, see prompts.yaml CRITICAL
-# RULES 4), Vacation Time held at 15 days (not pushed further - 20 days stays the hard
-# LIMIT/ceiling, just no longer part of the mandated schedule), and Bonus moved one grid
-# step from its 4% opening to 6%. Unlike PACING_STEP's "same for both conditions", this is
-# prosocial-only - proself's schedule explicitly caps at $86,000/15 days ("do not go further
-# even under pressure"), with no equivalent stretch. Keep in sync with prompts.yaml
-# [CONCESSION PACING] if either schedule changes.
-PROSOCIAL_STRETCH_ROUND = 8
-PROSOCIAL_STRETCH_STEP = {'issue-7': '$88,000', 'issue-3': '15 days', 'issue-1': '6%'}
+# Prosocial's schedule describes an EARLIER, separate MANDATORY step on different issues -
+# Bonus and Moving Expense Coverage, one grid step each (4% -> 6%, 70% -> 80%) - framed to
+# the candidate with integrative "this helps us both" language rather than the blunt
+# "I am definitively moving X" wording used for the Salary/Vacation step (see the round-note
+# text in /lucid). Proself has no equivalent - its schedule never mentions these issues.
+# Keep in sync with prompts.yaml [CONCESSION PACING] if either schedule changes.
+PROSOCIAL_JOINT_GAIN_ROUND = 6
+PROSOCIAL_JOINT_GAIN_STEP = {'issue-1': '6%', 'issue-5': '80%'}
 
 
 def _pacing_target(condition_key, turn_number):
@@ -1206,25 +1210,26 @@ def _pacing_target(condition_key, turn_number):
     level (canonical grid value) the recruiter is required to have reached by this round.
     None means the opening anchor is still an acceptable position, no mandatory move yet.
     """
-    if condition_key == 'prosocial' and turn_number >= 6:  # schedule: "$86,000 by round 6" / "15 days by round 6"
+    if condition_key == 'prosocial' and turn_number >= PROSOCIAL_CONCESSION_ROUND:
         return dict(PACING_STEP)
     if condition_key == 'proself' and turn_number >= PROSELF_CONCESSION_ROUND:
         return dict(PACING_STEP)
     return {'issue-7': None, 'issue-3': None}
 
 
-def _pacing_stretch_target(condition_key, turn_number):
+def _pacing_joint_gain_target(condition_key, turn_number):
     """
-    Returns {'issue-7': target_or_None, 'issue-3': target_or_None, 'issue-1': target_or_None}
-    - prosocial's deeper step (PROSOCIAL_STRETCH_STEP), due from PROSOCIAL_STRETCH_ROUND
-    onward. Just as mandatory as _pacing_target's result - the caller merges this into the
-    same required-minimum check and round-note language, it isn't offered conditionally on
-    anything (not on genuine_concession_this_round, not on first_concession_note). Always
-    None for proself - see the comment on PROSOCIAL_STRETCH_STEP.
+    Returns {'issue-1': target_or_None, 'issue-5': target_or_None} - prosocial's earlier,
+    separate mandatory step (PROSOCIAL_JOINT_GAIN_STEP) on Bonus/Moving Expense Coverage,
+    due from PROSOCIAL_JOINT_GAIN_ROUND onward. Just as mandatory as _pacing_target's
+    result - not offered conditionally on anything (not on genuine_concession_this_round,
+    not on first_concession_note) - but kept as its own dict/round rather than merged into
+    PACING_STEP since it targets different issues and gets different round-note framing.
+    Always None for proself.
     """
-    if condition_key == 'prosocial' and turn_number >= PROSOCIAL_STRETCH_ROUND:
-        return dict(PROSOCIAL_STRETCH_STEP)
-    return {'issue-7': None, 'issue-3': None}
+    if condition_key == 'prosocial' and turn_number >= PROSOCIAL_JOINT_GAIN_ROUND:
+        return dict(PROSOCIAL_JOINT_GAIN_STEP)
+    return {'issue-1': None, 'issue-5': None}
 
 
 def _call_openai_completion(messages, model, temperature, seed, openai_api_key, timeout=45):
@@ -1738,23 +1743,21 @@ def lucid():
                     # against it too - reused again in the issue-tracking block below.
                     prior_issue_statuses = _normalize_prior_issue_statuses(body.get('issue_statuses'))
 
-                    # This round's required minimum concession level, if any - see
-                    # _pacing_target(). Computed once, used both for the round note (Step 4)
-                    # and the post-hoc enforcement check (Step 5).
+                    # This round's required minimum concession level on Salary/Vacation, if
+                    # any - see _pacing_target(). Computed once, used both for the round note
+                    # (Step 4) and the post-hoc enforcement check (Step 5).
                     pacing_target = _pacing_target(condition_key, turn_number)
-                    # Prosocial's deeper step, due once this round is late enough - see
-                    # _pacing_stretch_target(). Just as mandatory as pacing_target; merged
-                    # with it below into mandatory_pacing_target for both the round note and
-                    # the Step 5 enforcement check.
-                    pacing_stretch_target = _pacing_stretch_target(condition_key, turn_number)
-                    # Combined required-minimum: wherever pacing_stretch_target also names an
-                    # issue (prosocial, round >= PROSOCIAL_STRETCH_ROUND), it's always the
-                    # deeper (more candidate-favorable) target by construction, so it wins
-                    # over pacing_target for that issue.
+                    # Prosocial's earlier, separate mandatory step on Bonus/Moving Expense
+                    # Coverage - see _pacing_joint_gain_target(). Just as mandatory as
+                    # pacing_target, but on different issues and with its own round-note
+                    # framing (Step 4), so it stays its own dict there; only merged with
+                    # pacing_target below for the Step 5 enforcement check, where both are
+                    # just "required minimums to verify" and the issue sets never overlap.
+                    joint_gain_target = _pacing_joint_gain_target(condition_key, turn_number)
                     mandatory_pacing_target = dict(pacing_target)
-                    for _issue_id, _target in pacing_stretch_target.items():
-                        if _target:
-                            mandatory_pacing_target[_issue_id] = _target
+                    mandatory_pacing_target.update(
+                        (issue_id, target) for issue_id, target in joint_gain_target.items() if target
+                    )
 
                     # --- Prosocial-only: one-time "first concession" exception ---
                     # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate offers
@@ -2112,18 +2115,16 @@ def lucid():
                             "again this round. Move the negotiation forward on the actual package "
                             "instead, unless they bring up something new."
                         )
-                    # If this round has a mandatory concession deadline (see _pacing_target and,
-                    # for prosocial from PROSOCIAL_STRETCH_ROUND, _pacing_stretch_target - both
-                    # merged into mandatory_pacing_target above, equally required), check the
-                    # ACCUMULATED package so far (not just what's mentioned this round) and name
-                    # explicitly whatever hasn't been reached yet - turns the schedule into a
-                    # concrete requirement instead of prose the model has to remember to apply many
-                    # turns after reading it.
-                    if any(mandatory_pacing_target.values()):
+                    # If this round has a mandatory concession deadline on Salary/Vacation (see
+                    # _pacing_target), check the ACCUMULATED package so far (not just what's
+                    # mentioned this round) and name explicitly whatever hasn't been reached
+                    # yet - turns the schedule into a concrete requirement instead of prose the
+                    # model has to remember to apply many turns after reading it.
+                    issue_label_by_id = {item['id']: item['label'] for item in _default_issue_statuses()}
+                    if any(pacing_target.values()):
                         prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
-                        issue_label_by_id = {item['id']: item['label'] for item in _default_issue_statuses()}
                         still_needed = []
-                        for issue_id, target in mandatory_pacing_target.items():
+                        for issue_id, target in pacing_target.items():
                             if not target:
                                 continue
                             current = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER[issue_id]
@@ -2142,6 +2143,37 @@ def lucid():
                                 f"so separately - the candidate should never be able to read your "
                                 f"message as implying they need to agree to something else before "
                                 f"this scheduled move counts, since it doesn't."
+                            )
+                    # Prosocial's earlier, separate mandatory step on Bonus/Moving Expense
+                    # Coverage (see _pacing_joint_gain_target) - same "REQUIRED, check the
+                    # accumulated package" mechanics as above, but framed to the model with
+                    # integrative, joint-gain language instead of the blunt wording above,
+                    # since this step is meant to read to the candidate as a collaborative
+                    # trade-style move rather than a flat unilateral concession.
+                    if any(joint_gain_target.values()):
+                        prior_by_id_jg = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                        jg_still_needed = []
+                        for issue_id, target in joint_gain_target.items():
+                            if not target:
+                                continue
+                            current = prior_by_id_jg.get(issue_id) or RECRUITER_OPENING_OFFER[issue_id]
+                            if _compare_recruiter_value(issue_id, current, target) == 'better':
+                                jg_still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
+                        if jg_still_needed:
+                            round_note += (
+                                f" Per your concession schedule, by this round you are REQUIRED to "
+                                f"have moved {' and '.join(jg_still_needed)} (you have not reached "
+                                f"this yet) - do so in this reply, even if the candidate hasn't "
+                                f"specifically asked for it. Frame it with integrative, joint-gain "
+                                f"language rather than a flat unilateral concession - something "
+                                f"like \"If moving further on {' and '.join(jg_still_needed)} helps "
+                                f"us both land on a better overall outcome, I'm willing to do that "
+                                f"now\" - but still execute it as a DEFINITIVE, unconditional move in "
+                                f"this reply's \"Current package\" recap, not something contingent on "
+                                f"the candidate agreeing to anything in return. If only one of these "
+                                f"issues is named above (the other already reached this level "
+                                f"earlier, e.g. via your one-time first-concession gift), only move "
+                                f"and frame the one still named."
                             )
                     # General "no free concession" prescription (both conditions, every round) -
                     # tells the model BEFORE it drafts a reply whether it has any justification to
@@ -2303,9 +2335,9 @@ def lucid():
                                         print("[WARN /lucid] Hold-firm regeneration call failed - keeping original (violating) reply") # Vercel Log
 
                             # --- Pacing-deadline safety net (rounds with a mandatory concession
-                            # target - see _pacing_target and, from PROSOCIAL_STRETCH_ROUND,
-                            # _pacing_stretch_target - both merged into mandatory_pacing_target
-                            # above) ---
+                            # target - see _pacing_target (Salary/Vacation) and
+                            # _pacing_joint_gain_target (prosocial's Bonus/Moving Expense step) -
+                            # both merged into mandatory_pacing_target above) ---
                             # The opposite failure mode from the hold-firm check above: instead of
                             # conceding too early, the model just never gets around to conceding at
                             # all, even past its own schedule's deadline. Compare the ACCUMULATED
@@ -2649,13 +2681,13 @@ def lucid():
                                 # rounds excluded (rule 1 already governs those).
                                 pc_violations = []
                                 if turn_number > HOLD_FIRM_ROUNDS:
-                                    for issue_id, target in pacing_target.items():
+                                    issue_label_by_id_pc = {item['id']: item['label'] for item in _default_issue_statuses()}
+                                    for issue_id, target in mandatory_pacing_target.items():
                                         if not target:
                                             continue
-                                        current_val = accumulated_by_id.get(issue_id) or HOLD_FIRM_ANCHOR.get(issue_id)
+                                        current_val = accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER.get(issue_id)
                                         if _compare_recruiter_value(issue_id, current_val, target) == 'better':
-                                            label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                            pc_violations.append((issue_id, label, target))
+                                            pc_violations.append((issue_id, issue_label_by_id_pc[issue_id], target))
 
                                 # Rule 3: no free concession - runs every round, including a
                                 # first-concession round (see note above): used to be skipped
@@ -2683,12 +2715,11 @@ def lucid():
                                     pacing_step = pacing_target.get(issue_id)
                                     if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
                                         continue  # within what the pacing schedule itself mandates this round
-                                    stretch_step = pacing_stretch_target.get(issue_id)
-                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                                        continue  # within Prosocial's optional stretch ceiling (rounds
-                                        # 8-10 only - pacing_stretch_target is None everywhere else) -
-                                        # pacing takes priority in this window, not gated on a fresh
-                                        # concession this specific round
+                                    joint_gain_step = joint_gain_target.get(issue_id)
+                                    if joint_gain_step and _compare_recruiter_value(issue_id, new_val, joint_gain_step) != 'worse':
+                                        continue  # within Prosocial's mandatory joint-gain step
+                                        # (Bonus/Moving Expense, round PROSOCIAL_JOINT_GAIN_ROUND+
+                                        # only - joint_gain_target is None everywhere else)
                                     if first_concession_note and grant_status == 'ok' and grant_info and issue_id == grant_info[0]:
                                         continue  # the CONFIRMED one-time first-concession gift
                                         # issue for this round - already verified separately by the
@@ -2717,22 +2748,22 @@ def lucid():
                                         # already proposed - not a free giveaway, it's the
                                         # recruiter following through on its own prior offer
                                     # Revert target: normally the prior round's value, but if
-                                    # this issue has a pacing_target (or, for prosocial from
-                                    # PROSOCIAL_STRETCH_ROUND, a deeper pacing_stretch_target)
-                                    # this round AND the prior value hasn't caught up to it yet,
+                                    # this issue has a pacing_target or joint_gain_target this
+                                    # round AND the prior value hasn't caught up to it yet,
                                     # reverting all the way to the prior value would undershoot
                                     # pacing's own minimum - Rule 2 would then fire on the very
                                     # next audit pass to pull it back up, burning a second
                                     # regeneration attempt on something a single correction could
                                     # have resolved. Revert to the pacing floor instead in that
                                     # case - satisfies "no ungrounded excess" and "pacing minimum
-                                    # met" in one edit. stretch_step is checked after pacing_step
-                                    # so it wins when both apply - it's always the deeper target.
+                                    # met" in one edit. pacing_step and joint_gain_step never
+                                    # apply to the same issue_id (disjoint issue sets), so there's
+                                    # no "which one wins" conflict between the two checks below.
                                     revert_target = old_val
                                     if pacing_step and _compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
                                         revert_target = pacing_step
-                                    if stretch_step and _compare_recruiter_value(issue_id, old_val, stretch_step) == 'better':
-                                        revert_target = stretch_step
+                                    if joint_gain_step and _compare_recruiter_value(issue_id, old_val, joint_gain_step) == 'better':
+                                        revert_target = joint_gain_step
                                     ug_moves.append((issue_id, item['label'], revert_target))
 
                                 # Rule 4: if the candidate accepted a specific trade the
@@ -2796,8 +2827,8 @@ def lucid():
                                     pacing_step = pacing_target.get(issue_id)
                                     if pacing_step and _compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
                                         continue
-                                    stretch_step = pacing_stretch_target.get(issue_id)
-                                    if stretch_step and _compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                                    joint_gain_step = joint_gain_target.get(issue_id)
+                                    if joint_gain_step and _compare_recruiter_value(issue_id, new_val, joint_gain_step) != 'worse':
                                         continue
                                     uc_label = next(
                                         (item['label'] for item in _default_issue_statuses() if item['id'] == issue_id),

@@ -244,19 +244,21 @@ def main():
         # mandatory concession target, name explicitly whatever hasn't been reached yet in the
         # accumulated package (not just what's mentioned this round).
         pacing_target = lucid._pacing_target(condition_key, turn_number)
-        # Prosocial's deeper step, if this round is late enough to be due - see
-        # lucid._pacing_stretch_target(). Just as mandatory as pacing_target - merged with it
-        # below into mandatory_pacing_target, same as lucid.py's /lucid endpoint.
-        pacing_stretch_target = lucid._pacing_stretch_target(condition_key, turn_number)
+        # Prosocial's earlier, separate mandatory step on Bonus/Moving Expense Coverage - see
+        # lucid._pacing_joint_gain_target(). Just as mandatory as pacing_target, but kept as
+        # its own dict for its own round-note framing below; only merged with pacing_target
+        # (as mandatory_pacing_target) for the final-audit mirror further down, same as
+        # lucid.py's /lucid endpoint.
+        joint_gain_target = lucid._pacing_joint_gain_target(condition_key, turn_number)
         mandatory_pacing_target = dict(pacing_target)
-        for _issue_id, _target in pacing_stretch_target.items():
-            if _target:
-                mandatory_pacing_target[_issue_id] = _target
-        if any(mandatory_pacing_target.values()):
+        mandatory_pacing_target.update(
+            (issue_id, target) for issue_id, target in joint_gain_target.items() if target
+        )
+        issue_label_by_id = {item['id']: item['label'] for item in lucid._default_issue_statuses()}
+        if any(pacing_target.values()):
             current_by_id = {item['id']: item['status'] for item in current_statuses}
-            issue_label_by_id = {item['id']: item['label'] for item in lucid._default_issue_statuses()}
             still_needed = []
-            for issue_id, target in mandatory_pacing_target.items():
+            for issue_id, target in pacing_target.items():
                 if not target:
                     continue
                 current = current_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER[issue_id]
@@ -274,6 +276,33 @@ def main():
                     f"reply, say so separately - the candidate should never be able to read "
                     f"your message as implying they need to agree to something else before "
                     f"this scheduled move counts, since it doesn't."
+                )
+        # Prosocial's earlier, separate mandatory step on Bonus/Moving Expense Coverage - same
+        # mechanics as above, but framed with integrative, joint-gain language instead of the
+        # blunt wording above - same as lucid.py's /lucid endpoint.
+        if any(joint_gain_target.values()):
+            current_by_id_jg = {item['id']: item['status'] for item in current_statuses}
+            jg_still_needed = []
+            for issue_id, target in joint_gain_target.items():
+                if not target:
+                    continue
+                current = current_by_id_jg.get(issue_id) or lucid.RECRUITER_OPENING_OFFER[issue_id]
+                if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
+                    jg_still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
+            if jg_still_needed:
+                round_note += (
+                    f" Per your concession schedule, by this round you are REQUIRED to have "
+                    f"moved {' and '.join(jg_still_needed)} (you have not reached this yet) - "
+                    f"do so in this reply, even if the candidate hasn't specifically asked for "
+                    f"it. Frame it with integrative, joint-gain language rather than a flat "
+                    f"unilateral concession - something like \"If moving further on "
+                    f"{' and '.join(jg_still_needed)} helps us both land on a better overall "
+                    f"outcome, I'm willing to do that now\" - but still execute it as a "
+                    f"DEFINITIVE, unconditional move in this reply's \"Current package\" recap, "
+                    f"not something contingent on the candidate agreeing to anything in return. "
+                    f"If only one of these issues is named above (the other already reached "
+                    f"this level earlier, e.g. via your one-time first-concession gift), only "
+                    f"move and frame the one still named."
                 )
         # Same general "no free concession" prescription as lucid.py's /lucid endpoint (both
         # conditions, every round) - tells the model BEFORE it drafts a reply whether it has
@@ -748,13 +777,13 @@ def main():
 
             pc_violations = []
             if turn_number > lucid.HOLD_FIRM_ROUNDS:
-                for issue_id, target in pacing_target.items():
+                issue_label_by_id_pc = {item['id']: item['label'] for item in lucid._default_issue_statuses()}
+                for issue_id, target in mandatory_pacing_target.items():
                     if not target:
                         continue
-                    current_val = accumulated_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR.get(issue_id)
+                    current_val = accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER.get(issue_id)
                     if lucid._compare_recruiter_value(issue_id, current_val, target) == 'better':
-                        label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                        pc_violations.append((issue_id, label, target))
+                        pc_violations.append((issue_id, issue_label_by_id_pc[issue_id], target))
 
             # Mirrors lucid.py: runs every round, including a first-concession round - used
             # to be skipped entirely whenever first_concession_note_fired, but a LATER safety
@@ -774,10 +803,10 @@ def main():
                 pacing_step = pacing_target.get(issue_id)
                 if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
                     continue  # within what the pacing schedule itself mandates this round
-                stretch_step = pacing_stretch_target.get(issue_id)
-                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                    continue  # within Prosocial's mandatory stretch step (rounds 8-10 only) -
-                    # pacing takes priority in this window, not gated on a fresh concession
+                joint_gain_step = joint_gain_target.get(issue_id)
+                if joint_gain_step and lucid._compare_recruiter_value(issue_id, new_val, joint_gain_step) != 'worse':
+                    continue  # within Prosocial's mandatory joint-gain step (Bonus/Moving
+                    # Expense, round PROSOCIAL_JOINT_GAIN_ROUND+ only)
                 if first_concession_note_fired and grant_status == 'ok' and grant_info and issue_id == grant_info[0]:
                     continue  # the CONFIRMED one-time first-concession gift issue this round -
                     # already verified separately, not an ungrounded move
@@ -804,8 +833,8 @@ def main():
                 revert_target = old_val
                 if pacing_step and lucid._compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
                     revert_target = pacing_step
-                if stretch_step and lucid._compare_recruiter_value(issue_id, old_val, stretch_step) == 'better':
-                    revert_target = stretch_step
+                if joint_gain_step and lucid._compare_recruiter_value(issue_id, old_val, joint_gain_step) == 'better':
+                    revert_target = joint_gain_step
                 ug_moves.append((issue_id, item['label'], revert_target))
 
             # Rule 4: same as lucid.py's /lucid endpoint - if the candidate accepted a
@@ -845,8 +874,8 @@ def main():
                 pacing_step = pacing_target.get(issue_id)
                 if pacing_step and lucid._compare_recruiter_value(issue_id, new_val, pacing_step) != 'worse':
                     continue
-                stretch_step = pacing_stretch_target.get(issue_id)
-                if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
+                joint_gain_step = joint_gain_target.get(issue_id)
+                if joint_gain_step and lucid._compare_recruiter_value(issue_id, new_val, joint_gain_step) != 'worse':
                     continue
                 uc_label = next(
                     (item['label'] for item in lucid._default_issue_statuses() if item['id'] == issue_id),

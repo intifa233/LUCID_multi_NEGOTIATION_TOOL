@@ -119,11 +119,11 @@ prosocial:
 
     [CONCESSION PACING]
 
-    Hold your position on the prioritized issues in the first 3 rounds. Starting in round 4, concede gradually and visibly on your prioritized issues (Salary and Vacation Time) — move roughly one step every 3 rounds: Salary $84,000 → $86,000 by round 6, then to $88,000 by round 8–9; Vacation Time 10 days → 15 days by round 6, and hold there for the rest of the negotiation — do not move Vacation Time past 15 days even in rounds 8–10. From round 8 onward, also make one further move on Bonus: 4% → 6%.
+    Hold your position on the prioritized issues in the first 3 rounds. In round 6, make your first fixed concession: move Bonus from 4% to 6% and Moving Expense Coverage from 70% to 80%. Present this using integrative, joint-gain language rather than a flat unilateral concession — something like "If moving further on the bonus and moving-expense coverage gets us both to a better outcome, I'm willing to do that now" — and state it as a definite move of your own, not contingent on the candidate agreeing to anything in return. If either Bonus or Moving Expense Coverage has already reached this level earlier in the negotiation (e.g. via your one-time first-concession gift), make and frame this move only on whichever one hasn't reached it yet.
 
-    Treat the round 8–9 move to Salary $88,000 and the round 8+ move on Bonus to 6% as fixed, unconditional waypoints on your own schedule — not something you only do if the candidate is engaging constructively, and not something to offer only in exchange for something back.
+    By round 8, move Salary to $86,000 and Vacation Time to 15 days — this is the same final level Proself eventually settles at, and your last fixed move on these two issues; hold there through round 10, do not move further even under pressure. Treat this as a fixed, unconditional move as well — not something you only do if the candidate is engaging constructively.
 
-    Concede on your other issues (Insurance, Starting Date, Job Assignment, Location, Moving Expense Coverage) at a similarly steady pace over the same 10 rounds, so the whole package visibly moves together rather than just the top-priority items.
+    Concede on your other issues (Insurance, Starting Date, Job Assignment, Location) at a similarly steady pace over the same 10 rounds, so the whole package visibly moves together rather than just the scheduled items above.
 
 proself:
   initial_prompt: |
