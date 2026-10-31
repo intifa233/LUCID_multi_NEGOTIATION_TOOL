@@ -1945,19 +1945,22 @@ def lucid():
                         # separate one-time gift, nothing else.
                         if round_concession_check.get('is_concession'):
                             requested_issue_id = round_concession_check.get('requested_issue_id')
-                            in_hold_firm_window = turn_number <= HOLD_FIRM_ROUNDS
 
-                            # Salary/Vacation can never be granted through this ONE-TIME
-                            # exception while still in the hold-firm window - that's the only
-                            # thing that can block the requested side; past hold-firm,
-                            # Salary/Vacation are treated like any other issue here (this
-                            # exception may nudge them one step early, ahead of their normal
-                            # pacing deadline - a deliberate one-time allowance, not a bug). An
-                            # unclear/missing requested_issue_id also counts as blocked -
-                            # nothing specific to grant.
+                            # Salary/Vacation can NEVER be granted through this ONE-TIME
+                            # exception, any round - they move only together, via the dedicated
+                            # hold-firm/pacing schedule (HOLD_FIRM_ANCHOR, then both land
+                            # together at PROSOCIAL_CONCESSION_ROUND). Used to allow this
+                            # exception to nudge one of them one step early, past the hold-firm
+                            # window, as a deliberate one-time allowance - but that let Salary
+                            # and Vacation arrive in DIFFERENT rounds (whichever one the
+                            # candidate happened to request got pulled forward alone, while the
+                            # other waited for its scheduled round) - found live in testing, and
+                            # changed to keep them as a strict bundle instead. An unclear/missing
+                            # requested_issue_id also counts as blocked - nothing specific to
+                            # grant.
                             first_concession_requested_issue_id = requested_issue_id
                             request_blocked = (not requested_issue_id) or (
-                                requested_issue_id in ('issue-3', 'issue-7') and in_hold_firm_window
+                                requested_issue_id in ('issue-3', 'issue-7')
                             )
 
                             # The alternate gift must come from a THIRD issue - never the
@@ -2018,13 +2021,14 @@ def lucid():
                                 print(f"[INFO /lucid] Prosocial first-concession exception triggered - package trade granted ({conceded_label} for {requested_issue_label})") # Vercel Log
                             else:
                                 # Case 2: the requested side CANNOT be granted this round
-                                # (Salary/Vacation still in hold-firm, or the ask was unclear) -
-                                # decline the WHOLE trade as a package: the conceded side does
-                                # NOT apply either, even though it was offered. The separate
-                                # one-time gift still fires.
+                                # (requested Salary/Vacation - never grantable through this
+                                # exception, any round - or the ask was unclear) - decline the
+                                # WHOLE trade as a package: the conceded side does NOT apply
+                                # either, even though it was offered. The separate one-time gift
+                                # still fires.
                                 first_concession_package_case = 'blocked'
                                 if requested_issue_id in ('issue-3', 'issue-7'):
-                                    block_reason = "Salary/Vacation Time is still in your hold-firm window"
+                                    block_reason = "Salary and Vacation Time only move together, according to your own fixed concession schedule, never through this one-time exception"
                                     blocked_label = 'Salary' if requested_issue_id == 'issue-7' else 'Vacation Time'
                                     trade_desc = f"{conceded_label} at {conceded_value} in exchange for {blocked_label}"
                                 else:
