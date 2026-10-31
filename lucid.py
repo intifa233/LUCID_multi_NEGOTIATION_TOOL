@@ -2150,30 +2150,33 @@ def lucid():
                     # integrative, joint-gain language instead of the blunt wording above,
                     # since this step is meant to read to the candidate as a collaborative
                     # trade-style move rather than a flat unilateral concession.
+                    jg_phrase_label = {'issue-1': 'the bonus', 'issue-5': 'moving-expense coverage'}
                     if any(joint_gain_target.values()):
                         prior_by_id_jg = {item['id']: item.get('status', '') for item in prior_issue_statuses}
                         jg_still_needed = []
+                        jg_example_parts = []
                         for issue_id, target in joint_gain_target.items():
                             if not target:
                                 continue
                             current = prior_by_id_jg.get(issue_id) or RECRUITER_OPENING_OFFER[issue_id]
                             if _compare_recruiter_value(issue_id, current, target) == 'better':
                                 jg_still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
+                                jg_example_parts.append(f"{jg_phrase_label[issue_id]} to {target}")
                         if jg_still_needed:
                             round_note += (
                                 f" Per your concession schedule, by this round you are REQUIRED to "
                                 f"have moved {' and '.join(jg_still_needed)} (you have not reached "
                                 f"this yet) - do so in this reply, even if the candidate hasn't "
-                                f"specifically asked for it. Frame it with integrative, joint-gain "
-                                f"language rather than a flat unilateral concession - something "
-                                f"like \"If moving further on {' and '.join(jg_still_needed)} helps "
-                                f"us both land on a better overall outcome, I'm willing to do that "
-                                f"now\" - but still execute it as a DEFINITIVE, unconditional move in "
-                                f"this reply's \"Current package\" recap, not something contingent on "
-                                f"the candidate agreeing to anything in return. If only one of these "
-                                f"issues is named above (the other already reached this level "
-                                f"earlier, e.g. via your one-time first-concession gift), only move "
-                                f"and frame the one still named."
+                                f"specifically asked for it. Explicitly name the joint outcome as "
+                                f"your reason for moving, rather than a flat unilateral concession - "
+                                f"say something like \"To improve the joint outcome for us, I'm "
+                                f"moving {' and '.join(jg_example_parts)}\". Still execute it as a "
+                                f"DEFINITIVE, unconditional move in this reply's \"Current package\" "
+                                f"recap, not something contingent on the candidate agreeing to "
+                                f"anything in return. If only one of these issues is named above "
+                                f"(the other already reached this level earlier, e.g. via your "
+                                f"one-time first-concession gift), only move and frame the one "
+                                f"still named."
                             )
                     # General "no free concession" prescription (both conditions, every round) -
                     # tells the model BEFORE it drafts a reply whether it has any justification to
