@@ -244,20 +244,24 @@ def main():
         # mandatory concession target, name explicitly whatever hasn't been reached yet in the
         # accumulated package (not just what's mentioned this round).
         pacing_target = lucid._pacing_target(condition_key, turn_number)
-        # Prosocial's OPTIONAL deeper step, if this round is late enough to offer it - see
-        # lucid._pacing_stretch_target(). Only actually offered to the model below when a
-        # genuine concession also happens this same round.
+        # Prosocial's deeper step, if this round is late enough to be due - see
+        # lucid._pacing_stretch_target(). Just as mandatory as pacing_target - merged with it
+        # below into mandatory_pacing_target, same as lucid.py's /lucid endpoint.
         pacing_stretch_target = lucid._pacing_stretch_target(condition_key, turn_number)
-        if any(pacing_target.values()):
+        mandatory_pacing_target = dict(pacing_target)
+        for _issue_id, _target in pacing_stretch_target.items():
+            if _target:
+                mandatory_pacing_target[_issue_id] = _target
+        if any(mandatory_pacing_target.values()):
             current_by_id = {item['id']: item['status'] for item in current_statuses}
+            issue_label_by_id = {item['id']: item['label'] for item in lucid._default_issue_statuses()}
             still_needed = []
-            for issue_id, target in pacing_target.items():
+            for issue_id, target in mandatory_pacing_target.items():
                 if not target:
                     continue
-                current = current_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id]
+                current = current_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER[issue_id]
                 if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
-                    label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                    still_needed.append(f"{label} to {target}")
+                    still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
             if still_needed:
                 round_note += (
                     f" Per your concession schedule, by this round you are REQUIRED to have "
@@ -313,31 +317,11 @@ def main():
                 round_note += (
                     " The candidate did NOT make a genuine concession this round (per your "
                     "payoff schedule) - per your negotiation protocol, you may NOT move any issue "
-                    "unconditionally in this reply. You may still move Salary/Vacation Time if "
-                    "your concession schedule separately requires it this round (see above), and "
+                    "unconditionally in this reply. You may still move an issue if your "
+                    "concession schedule separately requires it this round (see above), and "
                     "you may still propose a move CONDITIONALLY (asking for something specific in "
                     "return), but do not agree to or grant anything outright."
                 )
-            # Prosocial's optional deeper step, rounds 8-10: pacing takes priority in this
-            # window specifically, so this is mentioned regardless of whether a genuine
-            # concession happened THIS round - not gated on securing something back either.
-            if any(pacing_stretch_target.values()):
-                prior_by_id_stretch = {item['id']: item['status'] for item in current_statuses}
-                stretch_still_available = []
-                for issue_id, target in pacing_stretch_target.items():
-                    if not target:
-                        continue
-                    current = prior_by_id_stretch.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id]
-                    if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
-                        label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                        stretch_still_available.append(f"{label} to {target}")
-                if stretch_still_available:
-                    round_note += (
-                        f" This is also within your rounds 8-10 window: you may move further "
-                        f"toward {' and '.join(stretch_still_available)} in this reply if you "
-                        f"judge it appropriate, without needing a fresh concession this specific "
-                        f"round to justify it - pacing takes priority here."
-                    )
         # Same final-round prescription as lucid.py's /lucid endpoint - the candidate gets no
         # further turn after this one, so a conditional trade proposed here can never actually
         # be confirmed.
@@ -502,18 +486,19 @@ def main():
                     assistant_updates = lucid._extract_issue_updates_from_message_llm(reply, api_key)
                 else:
                     print("  [regeneration call failed - keeping original (violating) reply]")
-        elif any(pacing_target.values()):
+        elif any(mandatory_pacing_target.values()):
             accumulated = lucid.apply_issue_updates(current_statuses, assistant_updates)
             accumulated_by_id = {item['id']: item['status'] for item in accumulated}
+            issue_label_by_id = {item['id']: item['label'] for item in lucid._default_issue_statuses()}
             under_conceded = [
-                issue_id for issue_id, target in pacing_target.items()
+                issue_id for issue_id, target in mandatory_pacing_target.items()
                 if target and lucid._compare_recruiter_value(
-                    issue_id, accumulated_by_id.get(issue_id) or lucid.HOLD_FIRM_ANCHOR[issue_id], target
+                    issue_id, accumulated_by_id.get(issue_id) or lucid.RECRUITER_OPENING_OFFER[issue_id], target
                 ) == 'better'
             ]
             if under_conceded:
                 targets_desc = ', '.join(
-                    f"{'Salary' if i == 'issue-7' else 'Vacation Time'} to {pacing_target[i]}"
+                    f"{issue_label_by_id[i]} to {mandatory_pacing_target[i]}"
                     for i in under_conceded
                 )
                 print(f"  [pacing violation - required concession(s) not yet reached in round {turn_number} ({targets_desc}), regenerating]")
@@ -791,7 +776,7 @@ def main():
                     continue  # within what the pacing schedule itself mandates this round
                 stretch_step = pacing_stretch_target.get(issue_id)
                 if stretch_step and lucid._compare_recruiter_value(issue_id, new_val, stretch_step) != 'worse':
-                    continue  # within Prosocial's optional stretch ceiling (rounds 8-10 only) -
+                    continue  # within Prosocial's mandatory stretch step (rounds 8-10 only) -
                     # pacing takes priority in this window, not gated on a fresh concession
                 if first_concession_note_fired and grant_status == 'ok' and grant_info and issue_id == grant_info[0]:
                     continue  # the CONFIRMED one-time first-concession gift issue this round -
@@ -819,6 +804,8 @@ def main():
                 revert_target = old_val
                 if pacing_step and lucid._compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
                     revert_target = pacing_step
+                if stretch_step and lucid._compare_recruiter_value(issue_id, old_val, stretch_step) == 'better':
+                    revert_target = stretch_step
                 ug_moves.append((issue_id, item['label'], revert_target))
 
             # Rule 4: same as lucid.py's /lucid endpoint - if the candidate accepted a
