@@ -278,31 +278,33 @@ def main():
                     f"this scheduled move counts, since it doesn't."
                 )
         # Prosocial's earlier, separate mandatory step on Bonus/Moving Expense Coverage - same
-        # mechanics as above, but framed with integrative, joint-gain language instead of the
+        # mechanics as above, but framed by explicitly naming the joint outcome instead of the
         # blunt wording above - same as lucid.py's /lucid endpoint.
+        jg_phrase_label = {'issue-1': 'the bonus', 'issue-5': 'moving-expense coverage'}
         if any(joint_gain_target.values()):
             current_by_id_jg = {item['id']: item['status'] for item in current_statuses}
             jg_still_needed = []
+            jg_example_parts = []
             for issue_id, target in joint_gain_target.items():
                 if not target:
                     continue
                 current = current_by_id_jg.get(issue_id) or lucid.RECRUITER_OPENING_OFFER[issue_id]
                 if lucid._compare_recruiter_value(issue_id, current, target) == 'better':
                     jg_still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
+                    jg_example_parts.append(f"{jg_phrase_label[issue_id]} to {target}")
             if jg_still_needed:
                 round_note += (
                     f" Per your concession schedule, by this round you are REQUIRED to have "
                     f"moved {' and '.join(jg_still_needed)} (you have not reached this yet) - "
                     f"do so in this reply, even if the candidate hasn't specifically asked for "
-                    f"it. Frame it with integrative, joint-gain language rather than a flat "
-                    f"unilateral concession - something like \"If moving further on "
-                    f"{' and '.join(jg_still_needed)} helps us both land on a better overall "
-                    f"outcome, I'm willing to do that now\" - but still execute it as a "
-                    f"DEFINITIVE, unconditional move in this reply's \"Current package\" recap, "
-                    f"not something contingent on the candidate agreeing to anything in return. "
-                    f"If only one of these issues is named above (the other already reached "
-                    f"this level earlier, e.g. via your one-time first-concession gift), only "
-                    f"move and frame the one still named."
+                    f"it. Explicitly name the joint outcome as your reason for moving, rather "
+                    f"than a flat unilateral concession - say something like \"To improve the "
+                    f"joint outcome for us, I'm moving {' and '.join(jg_example_parts)}\". Still "
+                    f"execute it as a DEFINITIVE, unconditional move in this reply's \"Current "
+                    f"package\" recap, not something contingent on the candidate agreeing to "
+                    f"anything in return. If only one of these issues is named above (the other "
+                    f"already reached this level earlier, e.g. via your one-time first-"
+                    f"concession gift), only move and frame the one still named."
                 )
         # Same general "no free concession" prescription as lucid.py's /lucid endpoint (both
         # conditions, every round) - tells the model BEFORE it drafts a reply whether it has
