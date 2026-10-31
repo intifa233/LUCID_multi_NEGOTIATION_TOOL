@@ -1188,15 +1188,16 @@ def _value_mentioned_in_prose(raw_text, value):
 PROSELF_CONCESSION_ROUND = 9  # proself's schedule: "only in rounds 9-10" (or genuine walkaway risk, not modeled here)
 PACING_STEP = {'issue-7': '$86,000', 'issue-3': '15 days'}  # the mandated step for both conditions' first move
 
-# Prosocial's schedule describes a SECOND, conditional step beyond PACING_STEP: "...then
-# toward $88,000 by round 8-9 if the candidate is engaging constructively... and to 20 days
-# if it's needed in round 8-10" - this is prosocial's own hard limit (see prompts.yaml
-# CRITICAL RULES 4), offered as available rather than required, and only when earned. Proself
-# has no equivalent: its hard limit ($86,000/15 days) already equals PACING_STEP, so there's
-# nothing further to stretch toward - "do not go further even under pressure" is explicit in
-# its own schedule. Keep in sync with prompts.yaml if either schedule changes.
+# Prosocial's schedule describes a SECOND, MANDATORY step beyond PACING_STEP, due by
+# PROSOCIAL_STRETCH_ROUND: Salary to $88,000 (its own hard limit, see prompts.yaml CRITICAL
+# RULES 4), Vacation Time held at 15 days (not pushed further - 20 days stays the hard
+# LIMIT/ceiling, just no longer part of the mandated schedule), and Bonus moved one grid
+# step from its 4% opening to 6%. Unlike PACING_STEP's "same for both conditions", this is
+# prosocial-only - proself's schedule explicitly caps at $86,000/15 days ("do not go further
+# even under pressure"), with no equivalent stretch. Keep in sync with prompts.yaml
+# [CONCESSION PACING] if either schedule changes.
 PROSOCIAL_STRETCH_ROUND = 8
-PROSOCIAL_STRETCH_STEP = {'issue-7': '$88,000', 'issue-3': '20 days'}
+PROSOCIAL_STRETCH_STEP = {'issue-7': '$88,000', 'issue-3': '15 days', 'issue-1': '6%'}
 
 
 def _pacing_target(condition_key, turn_number):
@@ -1214,13 +1215,12 @@ def _pacing_target(condition_key, turn_number):
 
 def _pacing_stretch_target(condition_key, turn_number):
     """
-    Returns {'issue-7': target_or_None, 'issue-3': target_or_None} - prosocial's OPTIONAL
-    deeper step (PROSOCIAL_STRETCH_STEP), available from PROSOCIAL_STRETCH_ROUND onward.
-    Unlike _pacing_target, this is never mandatory - the caller only offers it to the model
-    when genuine_concession_this_round is also true this round (the deterministic stand-in
-    for "engaging constructively": avoids trusting the model's own subjective read, same
-    reasoning as everywhere else this session preferred a payoff-table check over a
-    self-judged one). Always None for proself - see the comment on PROSOCIAL_STRETCH_STEP.
+    Returns {'issue-7': target_or_None, 'issue-3': target_or_None, 'issue-1': target_or_None}
+    - prosocial's deeper step (PROSOCIAL_STRETCH_STEP), due from PROSOCIAL_STRETCH_ROUND
+    onward. Just as mandatory as _pacing_target's result - the caller merges this into the
+    same required-minimum check and round-note language, it isn't offered conditionally on
+    anything (not on genuine_concession_this_round, not on first_concession_note). Always
+    None for proself - see the comment on PROSOCIAL_STRETCH_STEP.
     """
     if condition_key == 'prosocial' and turn_number >= PROSOCIAL_STRETCH_ROUND:
         return dict(PROSOCIAL_STRETCH_STEP)
@@ -1742,10 +1742,19 @@ def lucid():
                     # _pacing_target(). Computed once, used both for the round note (Step 4)
                     # and the post-hoc enforcement check (Step 5).
                     pacing_target = _pacing_target(condition_key, turn_number)
-                    # Prosocial's OPTIONAL deeper step, if this round is late enough to offer
-                    # it - see _pacing_stretch_target(). Only actually offered to the model
-                    # below when a genuine concession also happens this same round.
+                    # Prosocial's deeper step, due once this round is late enough - see
+                    # _pacing_stretch_target(). Just as mandatory as pacing_target; merged
+                    # with it below into mandatory_pacing_target for both the round note and
+                    # the Step 5 enforcement check.
                     pacing_stretch_target = _pacing_stretch_target(condition_key, turn_number)
+                    # Combined required-minimum: wherever pacing_stretch_target also names an
+                    # issue (prosocial, round >= PROSOCIAL_STRETCH_ROUND), it's always the
+                    # deeper (more candidate-favorable) target by construction, so it wins
+                    # over pacing_target for that issue.
+                    mandatory_pacing_target = dict(pacing_target)
+                    for _issue_id, _target in pacing_stretch_target.items():
+                        if _target:
+                            mandatory_pacing_target[_issue_id] = _target
 
                     # --- Prosocial-only: one-time "first concession" exception ---
                     # See prompts.yaml [NEGOTIATION PROTOCOL]: the first time the candidate offers
@@ -2103,21 +2112,23 @@ def lucid():
                             "again this round. Move the negotiation forward on the actual package "
                             "instead, unless they bring up something new."
                         )
-                    # If this round has a mandatory concession deadline (see _pacing_target), check
-                    # the ACCUMULATED package so far (not just what's mentioned this round) and name
+                    # If this round has a mandatory concession deadline (see _pacing_target and,
+                    # for prosocial from PROSOCIAL_STRETCH_ROUND, _pacing_stretch_target - both
+                    # merged into mandatory_pacing_target above, equally required), check the
+                    # ACCUMULATED package so far (not just what's mentioned this round) and name
                     # explicitly whatever hasn't been reached yet - turns the schedule into a
                     # concrete requirement instead of prose the model has to remember to apply many
                     # turns after reading it.
-                    if any(pacing_target.values()):
+                    if any(mandatory_pacing_target.values()):
                         prior_by_id = {item['id']: item.get('status', '') for item in prior_issue_statuses}
+                        issue_label_by_id = {item['id']: item['label'] for item in _default_issue_statuses()}
                         still_needed = []
-                        for issue_id, target in pacing_target.items():
+                        for issue_id, target in mandatory_pacing_target.items():
                             if not target:
                                 continue
-                            current = prior_by_id.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
+                            current = prior_by_id.get(issue_id) or RECRUITER_OPENING_OFFER[issue_id]
                             if _compare_recruiter_value(issue_id, current, target) == 'better':
-                                label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                still_needed.append(f"{label} to {target}")
+                                still_needed.append(f"{issue_label_by_id[issue_id]} to {target}")
                         if still_needed:
                             round_note += (
                                 f" Per your concession schedule, by this round you are REQUIRED to "
@@ -2185,35 +2196,11 @@ def lucid():
                                 " The candidate did NOT make a genuine concession this round (per "
                                 "your payoff schedule) - per your negotiation protocol, you may NOT "
                                 "move any issue unconditionally in this reply. You may still move "
-                                "Salary/Vacation Time if your concession schedule separately requires "
-                                "it this round (see above), and you may still propose a move "
-                                "CONDITIONALLY (asking for something specific in return), but do not "
-                                "agree to or grant anything outright."
+                                "an issue if your concession schedule separately requires it this "
+                                "round (see above), and you may still propose a move CONDITIONALLY "
+                                "(asking for something specific in return), but do not agree to or "
+                                "grant anything outright."
                             )
-                        # Prosocial's optional deeper step (see PROSOCIAL_STRETCH_STEP), rounds
-                        # 8-10: pacing takes priority in this window specifically, so this is
-                        # mentioned regardless of whether a genuine concession happened THIS
-                        # round - not gated on securing something back either (unlike the
-                        # ordinary "at most one other issue" reciprocity above, which is still
-                        # about issues OTHER than Salary/Vacation).
-                        if any(pacing_stretch_target.values()):
-                            prior_by_id_stretch = {item['id']: item.get('status', '') for item in prior_issue_statuses}
-                            stretch_still_available = []
-                            for issue_id, target in pacing_stretch_target.items():
-                                if not target:
-                                    continue
-                                current = prior_by_id_stretch.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id]
-                                if _compare_recruiter_value(issue_id, current, target) == 'better':
-                                    label = 'Salary' if issue_id == 'issue-7' else 'Vacation Time'
-                                    stretch_still_available.append(f"{label} to {target}")
-                            if stretch_still_available:
-                                round_note += (
-                                    f" This is also within your rounds 8-10 window: you may move "
-                                    f"further toward {' and '.join(stretch_still_available)} in this "
-                                    f"reply if you judge it appropriate, without needing a fresh "
-                                    f"concession this specific round to justify it - pacing takes "
-                                    f"priority here."
-                                )
                     # Final-round prescription (both conditions) - the candidate gets no further
                     # turn after this one, so a conditional trade proposed here ("if you accept X,
                     # I'll do Y") can never actually be confirmed: the round limit is enforced by
@@ -2316,7 +2303,9 @@ def lucid():
                                         print("[WARN /lucid] Hold-firm regeneration call failed - keeping original (violating) reply") # Vercel Log
 
                             # --- Pacing-deadline safety net (rounds with a mandatory concession
-                            # target - see _pacing_target) ---
+                            # target - see _pacing_target and, from PROSOCIAL_STRETCH_ROUND,
+                            # _pacing_stretch_target - both merged into mandatory_pacing_target
+                            # above) ---
                             # The opposite failure mode from the hold-firm check above: instead of
                             # conceding too early, the model just never gets around to conceding at
                             # all, even past its own schedule's deadline. Compare the ACCUMULATED
@@ -2325,18 +2314,19 @@ def lucid():
                             # "did the value change" isn't the same question as "is this actually a
                             # concession" (e.g. an earlier start date sounds like a candidate
                             # concession but scores WORSE for the recruiter on the real table).
-                            elif any(pacing_target.values()):
+                            elif any(mandatory_pacing_target.values()):
                                 accumulated = apply_issue_updates(prior_issue_statuses, assistant_updates)
                                 accumulated_by_id = {item['id']: item.get('status', '') for item in accumulated}
+                                issue_label_by_id = {item['id']: item['label'] for item in _default_issue_statuses()}
                                 under_conceded = [
-                                    issue_id for issue_id, target in pacing_target.items()
+                                    issue_id for issue_id, target in mandatory_pacing_target.items()
                                     if target and _compare_recruiter_value(
-                                        issue_id, accumulated_by_id.get(issue_id) or HOLD_FIRM_ANCHOR[issue_id], target
+                                        issue_id, accumulated_by_id.get(issue_id) or RECRUITER_OPENING_OFFER[issue_id], target
                                     ) == 'better'
                                 ]
                                 if under_conceded:
                                     targets_desc = ', '.join(
-                                        f"{'Salary' if i == 'issue-7' else 'Vacation Time'} to {pacing_target[i]}"
+                                        f"{issue_label_by_id[i]} to {mandatory_pacing_target[i]}"
                                         for i in under_conceded
                                     )
                                     print(f"[WARN /lucid] Pacing violation - required concession(s) not yet reached in round {turn_number} ({targets_desc}), regenerating") # Vercel Log
@@ -2358,7 +2348,7 @@ def lucid():
                                         recheck_by_id = {item['id']: item.get('status', '') for item in recheck}
                                         still_under = [
                                             i for i in under_conceded
-                                            if _compare_recruiter_value(i, recheck_by_id.get(i) or HOLD_FIRM_ANCHOR[i], pacing_target[i]) == 'better'
+                                            if _compare_recruiter_value(i, recheck_by_id.get(i) or RECRUITER_OPENING_OFFER[i], mandatory_pacing_target[i]) == 'better'
                                         ]
                                         if still_under:
                                             print(f"[WARN /lucid] Pacing still not met on {still_under} after regeneration - keeping it, not retrying again") # Vercel Log
@@ -2727,17 +2717,22 @@ def lucid():
                                         # already proposed - not a free giveaway, it's the
                                         # recruiter following through on its own prior offer
                                     # Revert target: normally the prior round's value, but if
-                                    # this issue has a pacing_target this round AND the prior
-                                    # value hasn't caught up to it yet, reverting all the way to
-                                    # the prior value would undershoot pacing's own minimum -
-                                    # Rule 2 would then fire on the very next audit pass to pull
-                                    # it back up, burning a second regeneration attempt on
-                                    # something a single correction could have resolved. Revert
-                                    # to the pacing floor instead in that case - satisfies "no
-                                    # ungrounded excess" and "pacing minimum met" in one edit.
+                                    # this issue has a pacing_target (or, for prosocial from
+                                    # PROSOCIAL_STRETCH_ROUND, a deeper pacing_stretch_target)
+                                    # this round AND the prior value hasn't caught up to it yet,
+                                    # reverting all the way to the prior value would undershoot
+                                    # pacing's own minimum - Rule 2 would then fire on the very
+                                    # next audit pass to pull it back up, burning a second
+                                    # regeneration attempt on something a single correction could
+                                    # have resolved. Revert to the pacing floor instead in that
+                                    # case - satisfies "no ungrounded excess" and "pacing minimum
+                                    # met" in one edit. stretch_step is checked after pacing_step
+                                    # so it wins when both apply - it's always the deeper target.
                                     revert_target = old_val
                                     if pacing_step and _compare_recruiter_value(issue_id, old_val, pacing_step) == 'better':
                                         revert_target = pacing_step
+                                    if stretch_step and _compare_recruiter_value(issue_id, old_val, stretch_step) == 'better':
+                                        revert_target = stretch_step
                                     ug_moves.append((issue_id, item['label'], revert_target))
 
                                 # Rule 4: if the candidate accepted a specific trade the

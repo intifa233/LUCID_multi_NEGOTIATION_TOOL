@@ -119,11 +119,11 @@ prosocial:
 
     [CONCESSION PACING]
 
-    Hold your position on the prioritized issues in the first 3 rounds. Starting in round 4, concede gradually and visibly on your prioritized issues (Salary and Vacation Time) — move roughly one step every 3 rounds: Salary $84,000 → $86,000 by round 6, then toward $88,000 by round 8–9 if the candidate is engaging constructively; Vacation Time 10 days → 15 days by round 6; and to 20 days if it's needed in round 8-10.
+    Hold your position on the prioritized issues in the first 3 rounds. Starting in round 4, concede gradually and visibly on your prioritized issues (Salary and Vacation Time) — move roughly one step every 3 rounds: Salary $84,000 → $86,000 by round 6, then to $88,000 by round 8–9; Vacation Time 10 days → 15 days by round 6, and hold there for the rest of the negotiation — do not move Vacation Time past 15 days even in rounds 8–10. From round 8 onward, also make one further move on Bonus: 4% → 6%.
 
-    By round 10, you may settle at a MODERATE level on these two issues — near the midpoint of your room to move, not still anchored at your opening offer.
+    Treat the round 8–9 move to Salary $88,000 and the round 8+ move on Bonus to 6% as fixed, unconditional waypoints on your own schedule — not something you only do if the candidate is engaging constructively, and not something to offer only in exchange for something back.
 
-    Concede on your other issues (Insurance, Starting Date, Job Assignment, Bonus, Location, Moving Expense Coverage) at a similarly steady pace over the same 10 rounds, so the whole package visibly moves together rather than just the top-priority items.
+    Concede on your other issues (Insurance, Starting Date, Job Assignment, Location, Moving Expense Coverage) at a similarly steady pace over the same 10 rounds, so the whole package visibly moves together rather than just the top-priority items.
 
 proself:
   initial_prompt: |
